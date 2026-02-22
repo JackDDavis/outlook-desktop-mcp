@@ -24,3 +24,68 @@ FOLDER_NAME_TO_ENUM = {
 }
 
 OL_MAIL_ITEM = 0
+OL_APPOINTMENT_ITEM = 1
+
+# OlBusyStatus
+OL_BUSY_FREE = 0
+OL_BUSY_TENTATIVE = 1
+OL_BUSY_BUSY = 2
+OL_BUSY_OUT_OF_OFFICE = 3
+OL_BUSY_WORKING_ELSEWHERE = 4
+
+# OlMeetingStatus
+OL_NON_MEETING = 0
+OL_MEETING = 1
+OL_MEETING_RECEIVED = 3
+OL_MEETING_CANCELED = 5
+
+# OlMeetingResponse
+OL_RESPONSE_TENTATIVE = 2
+OL_RESPONSE_ACCEPTED = 3
+OL_RESPONSE_DECLINED = 4
+
+# OlRecipientType (for meetings)
+OL_REQUIRED = 1
+OL_OPTIONAL = 2
+OL_RESOURCE = 3
+
+BUSY_STATUS_NAMES = {
+    0: "free", 1: "tentative", 2: "busy",
+    3: "out_of_office", 4: "working_elsewhere",
+}
+
+MEETING_STATUS_NAMES = {
+    0: "appointment", 1: "meeting", 3: "received", 5: "canceled",
+}
+
+RESPONSE_NAMES = {
+    0: "none", 1: "organized", 2: "tentative",
+    3: "accepted", 4: "declined", 5: "not_responded",
+}
+
+# OlItemType
+OL_TASK_ITEM = 3
+
+# OlTaskStatus
+OL_TASK_NOT_STARTED = 0
+OL_TASK_IN_PROGRESS = 1
+OL_TASK_COMPLETE = 2
+OL_TASK_WAITING = 3
+OL_TASK_DEFERRED = 4
+
+TASK_STATUS_NAMES = {
+    0: "not_started", 1: "in_progress", 2: "complete",
+    3: "waiting", 4: "deferred",
+}
+
+# OlImportance
+OL_IMPORTANCE_LOW = 0
+OL_IMPORTANCE_NORMAL = 1
+OL_IMPORTANCE_HIGH = 2
+
+IMPORTANCE_NAMES = {0: "low", 1: "normal", 2: "high"}
+
+# OlRuleActionType (common ones)
+OL_RULE_ACTION_MOVE = 1
+OL_RULE_ACTION_DELETE = 8
+OL_RULE_ACTION_MARK_READ = 11
