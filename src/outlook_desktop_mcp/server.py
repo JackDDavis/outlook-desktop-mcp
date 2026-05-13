@@ -1387,13 +1387,29 @@ async def get_out_of_office() -> str:
 # =====================================================================
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--http", action="store_true", help="Run HTTP/SSE transport instead of stdio")
+    parser.add_argument("--host", default="0.0.0.0", help="Host for HTTP transport (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=3721, help="Port for HTTP transport (default: 3721)")
+    args = parser.parse_args()
+
     logger.info("Starting Outlook Desktop MCP server...")
     bridge.start()
-    logger.info("COM bridge ready. Starting MCP stdio transport...")
-    try:
-        mcp.run(transport="stdio")
-    finally:
-        bridge.stop()
+    if args.http:
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        logger.info("COM bridge ready. Starting MCP SSE transport on port %d...", args.port)
+        try:
+            mcp.run(transport="sse")
+        finally:
+            bridge.stop()
+    else:
+        logger.info("COM bridge ready. Starting MCP stdio transport...")
+        try:
+            mcp.run(transport="stdio")
+        finally:
+            bridge.stop()
 
 
 if __name__ == "__main__":
