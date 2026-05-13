@@ -69,20 +69,17 @@ async def proxy():
     async def write_responses():
         while True:
             data = await response_queue.get()
-            sys.stdout.write(data + "\n")
-            sys.stdout.flush()
+            sys.stdout.buffer.write((data + "\n").encode("utf-8"))
+            sys.stdout.buffer.flush()
 
     async def read_stdin(client):
-        loop = asyncio.get_event_loop()
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
-
+        # asyncio pipe readers can fail on Windows subprocess stdio handles.
+        # Use a thread-backed blocking readline for cross-platform behavior.
         while True:
-            line = await reader.readline()
+            line = await asyncio.to_thread(sys.stdin.readline)
             if not line:
                 break
-            line = line.decode("utf-8").strip()
+            line = line.strip()
             if not line:
                 continue
             while message_endpoint is None:
