@@ -58,20 +58,39 @@ This route preserves full tool functionality (`list_folders`, `list_emails`, etc
 
 ## Tool Restrictions (--deny)
 
-Use `--deny` to remove specific tools from the server, preventing agents from calling them. This lets you run different permission levels for different agents:
+Both the server and the proxy support `--deny` to remove tools, enabling flexible permission levels.
 
-```bash
-# Read-only agent: no sending, replying, or drafting
-outlook-desktop-mcp --deny send_email,reply_email,create_draft
+### Per-agent restrictions (proxy-level, recommended)
 
-# Compose-only agent: can draft but not send
-outlook-desktop-mcp --deny send_email,reply_email
+When multiple agents share one SSE server, use `--deny` on the **proxy** to give each agent different permissions. The proxy strips denied tools from the manifest and rejects denied tool calls before they reach the server.
 
-# SSE mode with restrictions
-outlook-desktop-mcp --http --deny send_email,reply_email
+```json
+{
+  "mcpServers": {
+    "outlook-desktop": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "stdio_sse_proxy.py",
+        "--deny", "send_email,reply_email"
+      ]
+    }
+  }
+}
 ```
 
-Tool names are validated at startup — typos cause an immediate error. Use `--deny` in your MCP client config to enforce per-agent restrictions.
+Common presets:
+- **Compose-only** (can draft, can't send): `--deny send_email,reply_email`
+- **Read-only**: `--deny send_email,reply_email,create_draft,move_email,bulk_move_emails,...`
+- **Full access**: omit `--deny`
+
+### Global restrictions (server-level)
+
+Use `--deny` on the **server** to restrict all clients universally. Tool names are validated at startup — typos cause an immediate error.
+
+```bash
+outlook-desktop-mcp --http --deny send_email,reply_email
+```
 
 ## How It Works
 
