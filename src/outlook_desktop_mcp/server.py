@@ -538,6 +538,7 @@ async def list_emails(
     folder: str = "inbox",
     count: int = 10,
     unread_only: bool = False,
+    include_body: bool = False,
     start_date: str = "",
     end_date: str = "",
     account: str = "",
@@ -558,6 +559,9 @@ async def list_emails(
             list_folders output.
         count: Maximum number of emails to return. Default 10, max recommended 50.
         unread_only: If true, only return unread emails. Default false.
+        include_body: If true, include to, cc, and a ~300 char body preview
+            for each email. Useful for triage without needing read_email
+            follow-up calls. Default false.
         start_date: Optional. Only return emails received on or after this date.
             ISO 8601 format (e.g. "2026-03-10" or "2026-03-10 09:00").
         end_date: Optional. Only return emails received on or before this date.
@@ -568,7 +572,7 @@ async def list_emails(
     Returns:
         JSON array of email summary objects.
     """
-    def _list(outlook, namespace, folder, count, unread_only, start_date, end_date, account):
+    def _list(outlook, namespace, folder, count, unread_only, include_body, start_date, end_date, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
@@ -599,13 +603,13 @@ async def list_emails(
         limit = min(count, items.Count)
         for i in range(limit):
             try:
-                results.append(format_email_summary(items.Item(i + 1)))
+                results.append(format_email_summary(items.Item(i + 1), include_body=include_body))
             except Exception:
                 continue
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_list, folder, count, unread_only, start_date, end_date, account)
+        return await bridge.call(_list, folder, count, unread_only, include_body, start_date, end_date, account)
     except Exception as e:
         return f"Error listing emails: {format_com_error(e)}"
 
@@ -846,6 +850,63 @@ async def reply_email(
 
 
 # =====================================================================
+# TOOL 7b: forward_email
+# =====================================================================
+
+@mcp.tool()
+async def forward_email(
+    entry_id: str,
+    to: str,
+    body: str = "",
+    cc: str = "",
+    bcc: str = "",
+    account: str = "",
+) -> str:
+    """Forward an email to new recipients, preserving the original content and attachments.
+
+    Creates and sends a forwarded copy of the email. The original message
+    (headers, body, and all attachments) is included automatically.
+
+    Args:
+        entry_id: The unique Outlook EntryID of the email to forward.
+            Get this from list_emails, read_email, or search_emails results.
+        to: One or more recipient email addresses, separated by semicolons.
+        body: Optional. Additional message to prepend above the forwarded content.
+        cc: Optional. CC recipients, separated by semicolons.
+        bcc: Optional. BCC recipients, separated by semicolons.
+        account: Optional. Account display name (or substring). Only needed
+            if entry_id is ambiguous across stores.
+
+    Returns:
+        Confirmation indicating the email was forwarded, or an error.
+    """
+    def _forward(outlook, namespace, entry_id, to, body, cc, bcc, account):
+        if account:
+            store = _require_store(namespace, account)
+            item = namespace.GetItemFromID(entry_id, store.StoreID)
+        else:
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+            return err
+        subject = item.Subject
+        fwd = item.Forward()
+        fwd.To = to
+        if cc:
+            fwd.CC = cc
+        if bcc:
+            fwd.BCC = bcc
+        if body:
+            fwd.Body = body + "\n\n" + fwd.Body
+        fwd.Send()
+        return f"Forwarded '{subject}' to {to}"
+
+    try:
+        return await bridge.call(_forward, entry_id, to, body, cc, bcc, account)
+    except Exception as e:
+        return f"Error forwarding email: {format_com_error(e)}"
+
+
+# =====================================================================
 # TOOL 8: list_folders
 # =====================================================================
 
@@ -933,6 +994,7 @@ async def search_emails(
     query: str,
     folder: str = "inbox",
     count: int = 10,
+    include_body: bool = False,
     start_date: str = "",
     end_date: str = "",
     account: str = "",
@@ -949,6 +1011,8 @@ async def search_emails(
         folder: Folder to search in. Default "inbox". Supports same
             names as list_emails.
         count: Maximum results to return. Default 10.
+        include_body: If true, include to, cc, and a ~300 char body preview
+            for each result. Default false.
         start_date: Optional. Only return emails received on or after this date.
             ISO 8601 format (e.g. "2026-03-10" or "2026-03-10 09:00").
         end_date: Optional. Only return emails received on or before this date.
@@ -959,7 +1023,7 @@ async def search_emails(
     Returns:
         JSON array of matching email summaries, or an error.
     """
-    def _search(outlook, namespace, query, folder, count, start_date, end_date, account):
+    def _search(outlook, namespace, query, folder, count, include_body, start_date, end_date, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
@@ -994,13 +1058,13 @@ async def search_emails(
         limit = min(count, items.Count)
         for i in range(limit):
             try:
-                results.append(format_email_summary(items.Item(i + 1)))
+                results.append(format_email_summary(items.Item(i + 1), include_body=include_body))
             except Exception:
                 continue
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_search, query, folder, count, start_date, end_date, account)
+        return await bridge.call(_search, query, folder, count, include_body, start_date, end_date, account)
     except Exception as e:
         return f"Error searching emails: {format_com_error(e)}"
 
@@ -1379,6 +1443,7 @@ async def list_events(
     start_date: str = "",
     end_date: str = "",
     count: int = 20,
+    include_body: bool = False,
     account: str = "",
 ) -> str:
     """List upcoming calendar events from Outlook.
@@ -1396,13 +1461,15 @@ async def list_events(
             or "2026-02-25 09:00"). Default: now.
         end_date: End of date range. Default: 7 days from start_date.
         count: Maximum number of events to return. Default 20.
+        include_body: If true, include a ~300 char body preview and categories
+            for each event. Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of event summary objects.
     """
-    def _list(outlook, namespace, start_date, end_date, count, account):
+    def _list(outlook, namespace, start_date, end_date, count, include_body, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         calendar = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
@@ -1426,7 +1493,7 @@ async def list_events(
         for item in filtered:
             n += 1
             try:
-                results.append(format_event_summary(item))
+                results.append(format_event_summary(item, include_body=include_body))
             except Exception:
                 continue
             if n >= count:
@@ -1435,7 +1502,7 @@ async def list_events(
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_list, start_date, end_date, count, account)
+        return await bridge.call(_list, start_date, end_date, count, include_body, account)
     except Exception as e:
         return f"Error listing events: {format_com_error(e)}"
 
@@ -1821,6 +1888,7 @@ async def search_events(
     start_date: str = "",
     end_date: str = "",
     count: int = 10,
+    include_body: bool = False,
     account: str = "",
 ) -> str:
     """Search for calendar events by keyword.
@@ -1835,13 +1903,15 @@ async def search_events(
             days ago.
         end_date: End of search range. Default: 30 days from now.
         count: Maximum results to return. Default 10.
+        include_body: If true, include a ~300 char body preview and categories
+            for each result. Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of matching event summaries.
     """
-    def _search(outlook, namespace, query, start_date, end_date, count, account):
+    def _search(outlook, namespace, query, start_date, end_date, count, include_body, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         calendar = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
@@ -1863,7 +1933,7 @@ async def search_events(
         for item in filtered:
             if query_lower in (item.Subject or "").lower():
                 try:
-                    results.append(format_event_summary(item))
+                    results.append(format_event_summary(item, include_body=include_body))
                 except Exception:
                     continue
                 if len(results) >= count:
@@ -1872,7 +1942,7 @@ async def search_events(
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_search, query, start_date, end_date, count, account)
+        return await bridge.call(_search, query, start_date, end_date, count, include_body, account)
     except Exception as e:
         return f"Error searching events: {format_com_error(e)}"
 
@@ -1885,6 +1955,7 @@ async def search_events(
 async def list_tasks(
     include_completed: bool = False,
     count: int = 20,
+    include_body: bool = False,
     account: str = "",
 ) -> str:
     """List tasks from the Outlook Tasks folder.
@@ -1897,13 +1968,15 @@ async def list_tasks(
         include_completed: If true, include completed tasks. Default false
             (only pending/in-progress tasks).
         count: Maximum number of tasks to return. Default 20.
+        include_body: If true, include a ~300 char body/notes preview for
+            each task. Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON array of task summary objects.
     """
-    def _list(outlook, namespace, include_completed, count, account):
+    def _list(outlook, namespace, include_completed, count, include_body, account):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         folder = store.GetDefaultFolder(OL_FOLDER_TASKS)
@@ -1917,13 +1990,13 @@ async def list_tasks(
         limit = min(count, items.Count)
         for i in range(limit):
             try:
-                results.append(format_task_summary(items.Item(i + 1)))
+                results.append(format_task_summary(items.Item(i + 1), include_body=include_body))
             except Exception:
                 continue
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_list, include_completed, count, account)
+        return await bridge.call(_list, include_completed, count, include_body, account)
     except Exception as e:
         return f"Error listing tasks: {format_com_error(e)}"
 

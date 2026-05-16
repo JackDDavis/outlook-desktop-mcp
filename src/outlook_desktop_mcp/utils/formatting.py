@@ -22,9 +22,9 @@ def strip_html(html: str) -> str:
     return text
 
 
-def format_email_summary(item) -> dict:
+def format_email_summary(item, include_body: bool = False) -> dict:
     """Extract key fields from an Outlook MailItem into a dict."""
-    return {
+    result = {
         "entry_id": item.EntryID,
         "subject": item.Subject or "(no subject)",
         "sender": getattr(item, "SenderEmailAddress", "unknown"),
@@ -34,6 +34,11 @@ def format_email_summary(item) -> dict:
         "has_attachments": bool(item.Attachments.Count > 0),
         "attachment_count": item.Attachments.Count,
     }
+    if include_body:
+        result["to"] = item.To or ""
+        result["cc"] = item.CC or ""
+        result["body_preview"] = truncate(item.Body or "", 300)
+    return result
 
 
 def format_email_full(item, body_max_length: int = 5000) -> dict:
@@ -48,9 +53,9 @@ def format_email_full(item, body_max_length: int = 5000) -> dict:
 # --- Calendar formatting ---
 
 
-def format_event_summary(item) -> dict:
+def format_event_summary(item, include_body: bool = False) -> dict:
     """Extract key fields from an Outlook AppointmentItem."""
-    return {
+    result = {
         "entry_id": item.EntryID,
         "subject": item.Subject or "(no subject)",
         "start": str(item.Start),
@@ -65,6 +70,10 @@ def format_event_summary(item) -> dict:
         "required_attendees": item.RequiredAttendees or "",
         "optional_attendees": item.OptionalAttendees or "",
     }
+    if include_body:
+        result["body_preview"] = truncate(item.Body or "", 300)
+        result["categories"] = item.Categories or ""
+    return result
 
 
 def format_event_full(item, body_max_length: int = 5000) -> dict:
@@ -83,9 +92,9 @@ def format_event_full(item, body_max_length: int = 5000) -> dict:
 # --- Task formatting ---
 
 
-def format_task_summary(item) -> dict:
+def format_task_summary(item, include_body: bool = False) -> dict:
     """Extract key fields from an Outlook TaskItem."""
-    return {
+    result = {
         "entry_id": item.EntryID,
         "subject": item.Subject or "(no subject)",
         "status": TASK_STATUS_NAMES.get(item.Status, "unknown"),
@@ -97,6 +106,9 @@ def format_task_summary(item) -> dict:
         "categories": item.Categories or "",
         "owner": item.Owner or "",
     }
+    if include_body:
+        result["body_preview"] = truncate(item.Body or "", 300)
+    return result
 
 
 def format_task_full(item, body_max_length: int = 5000) -> dict:
