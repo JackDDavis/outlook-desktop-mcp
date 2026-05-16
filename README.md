@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 
-**Turn your running Outlook Desktop into an MCP server with 35 tools.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Turn your running Outlook Desktop into an MCP server with 36 tools.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 
 Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session. Multi-account support lets you target any account configured in Outlook.
 
@@ -22,7 +22,7 @@ pip install outlook-desktop-mcp
 claude mcp add outlook-desktop -- outlook-desktop-mcp
 ```
 
-**3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 35 tools are available immediately.
+**3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 36 tools are available immediately.
 
 ## Alternative Transport: stdio → SSE Proxy (recommended for elevated/WSL edge cases)
 
@@ -121,11 +121,13 @@ Internally, the server runs a dedicated COM thread (Single-Threaded Apartment) t
 - **Python 3.12+**
 - **Outlook must be running** when the MCP server starts
 
-## Available Tools (35)
+## Available Tools (36)
 
 All tool descriptions are optimized for LLM tool discovery — Claude understands exactly how to use each one, what arguments to pass, and what to expect back.
 
 Most tools accept an optional `account` parameter to target a specific Outlook account (e.g., `"work@company.com"`). If omitted, the default account is used.
+
+List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `list_tasks`) accept an optional `include_body` parameter. When true, results include a ~300 char body preview, To/CC, and categories inline — eliminating the need for follow-up detail calls during triage.
 
 ### Account (1 tool)
 
@@ -133,16 +135,17 @@ Most tools accept an optional `account` parameter to target a specific Outlook a
 |------|-------------|
 | `list_accounts` | List all accounts configured in Outlook with display name and email |
 
-### Email (14 tools)
+### Email (15 tools)
 
 | Tool | Description |
 |------|-------------|
 | `send_email` | Send an email with To/CC/BCC, plain text or HTML body |
 | `create_draft` | Create a draft email in Drafts without sending (for user review) |
-| `list_emails` | List recent emails from any folder, with optional unread filter |
+| `list_emails` | List recent emails from any folder, with optional body preview |
 | `read_email` | Read full email content by entry ID or subject search |
 | `search_emails` | Full-text search across email subjects and bodies |
 | `reply_email` | Reply or reply-all, preserving the conversation thread |
+| `forward_email` | Forward an email with attachments to new recipients |
 | `mark_as_read` | Mark a specific email as read |
 | `mark_as_unread` | Mark a specific email as unread |
 | `move_email` | Move an email to Archive, Trash, or any folder |
@@ -259,7 +262,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching strategy and developmen
 ```
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
-    server.py              # MCP server + all 35 tool definitions
+    server.py              # MCP server + all 36 tool definitions
     com_bridge.py          # Async-to-COM threading bridge (60s timeout)
     tools/
       _folder_constants.py # Outlook enums and constants
