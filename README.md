@@ -4,9 +4,9 @@
 [![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 
-**Turn your running Outlook Desktop into an MCP server with 29 tools.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Turn your running Outlook Desktop into an MCP server with 34 tools.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 
-Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session.
+Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session. Multi-account support lets you target any account configured in Outlook.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ pip install outlook-desktop-mcp
 claude mcp add outlook-desktop -- outlook-desktop-mcp
 ```
 
-**3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 29 tools are available immediately.
+**3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 34 tools are available immediately.
 
 ## Alternative Transport: stdio → SSE Proxy (recommended for elevated/WSL edge cases)
 
@@ -30,6 +30,7 @@ If direct stdio launch of `outlook-desktop-mcp.exe` fails in your client context
 
 - `stdio_sse_proxy.py` keeps MCP client transport as stdio
 - The proxy forwards requests to the running SSE endpoint (`http://127.0.0.1:3721/sse`)
+- Endpoint origin validation prevents the SSE server from redirecting requests externally
 
 Example Claude MCP entry:
 
@@ -84,11 +85,19 @@ Internally, the server runs a dedicated COM thread (Single-Threaded Apartment) t
 - **Python 3.12+**
 - **Outlook must be running** when the MCP server starts
 
-## Available Tools (29)
+## Available Tools (34)
 
 All tool descriptions are optimized for LLM tool discovery — Claude understands exactly how to use each one, what arguments to pass, and what to expect back.
 
-### Email (9 tools)
+Most tools accept an optional `account` parameter to target a specific Outlook account (e.g., `"work@company.com"`). If omitted, the default account is used.
+
+### Account (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `list_accounts` | List all accounts configured in Outlook with display name and email |
+
+### Email (13 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -101,6 +110,10 @@ All tool descriptions are optimized for LLM tool discovery — Claude understand
 | `mark_as_unread` | Mark a specific email as unread |
 | `move_email` | Move an email to Archive, Trash, or any folder |
 | `list_folders` | Browse the complete folder hierarchy with item counts |
+| `bulk_mark_as_read` | Mark multiple emails as read in a single call |
+| `bulk_mark_as_unread` | Mark multiple emails as unread in a single call |
+| `bulk_move_emails` | Move multiple emails to a folder in a single call |
+| `bulk_read_emails` | Read full content of multiple emails in a single call |
 
 ### Calendar (8 tools)
 
@@ -184,6 +197,9 @@ Once registered, just talk to Claude naturally:
 - *"What categories do I have? Set this email to 'Follow-up'"*
 - *"List my mail rules"*
 - *"Am I set as Out of Office?"*
+- *"What accounts do I have in Outlook?"*
+- *"Show unread emails from my work account"*
+- *"Mark all those emails as read"*
 
 ## Why Not Microsoft Graph?
 
@@ -206,8 +222,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching strategy and developmen
 ```
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
-    server.py              # MCP server + all 29 tool definitions
-    com_bridge.py          # Async-to-COM threading bridge
+    server.py              # MCP server + all 34 tool definitions
+    com_bridge.py          # Async-to-COM threading bridge (60s timeout)
     tools/
       _folder_constants.py # Outlook enums and constants
     utils/
@@ -221,6 +237,7 @@ outlook-desktop-mcp/
     extras_com_test.py     # Tasks/attachments/categories/rules/OOF COM test
     extras_mcp_test.py     # Tasks/attachments/categories/rules/OOF MCP test
   outlook-desktop-mcp.cmd  # Windows launcher script
+  stdio_sse_proxy.py       # WSL stdio-to-SSE proxy (with endpoint validation)
   pyproject.toml
 ```
 
