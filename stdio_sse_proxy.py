@@ -13,6 +13,7 @@ import sys
 import os
 import struct
 import socket
+from urllib.parse import urlparse
 
 PORT = 3721
 
@@ -62,6 +63,13 @@ async def proxy():
                     endpoint = sse.data
                     if endpoint.startswith("/"):
                         endpoint = SSE_CONNECT_URL + endpoint
+                    # Validate endpoint points to the expected server
+                    parsed = urlparse(endpoint)
+                    expected = urlparse(SSE_CONNECT_URL)
+                    if parsed.netloc != expected.netloc:
+                        raise ValueError(
+                            f"SSE server returned unexpected endpoint host: {parsed.netloc}"
+                        )
                     message_endpoint = endpoint
                 elif sse.event == "message":
                     await response_queue.put(sse.data)
