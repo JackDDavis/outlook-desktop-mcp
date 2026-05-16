@@ -24,6 +24,37 @@ claude mcp add outlook-desktop -- outlook-desktop-mcp
 
 **3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 29 tools are available immediately.
 
+## Alternative Transport: stdio → SSE Proxy (recommended for elevated/WSL edge cases)
+
+If direct stdio launch of `outlook-desktop-mcp.exe` fails in your client context (for example, elevated agent process, Windows handle quirks, or WSL routing), run the server as SSE on Windows and connect through the included stdio proxy:
+
+- `stdio_sse_proxy.py` keeps MCP client transport as stdio
+- The proxy forwards requests to the running SSE endpoint (`http://127.0.0.1:3721/sse`)
+
+Example Claude MCP entry:
+
+```json
+{
+  "mcpServers": {
+    "outlook-desktop": {
+      "type": "stdio",
+      "command": "C:\\tools\\outlook-desktop-mcp\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\tools\\outlook-desktop-mcp\\stdio_sse_proxy.py"
+      ]
+    }
+  }
+}
+```
+
+Start the Outlook server in SSE mode:
+
+```bash
+outlook-desktop-mcp --http --host 0.0.0.0 --port 3721
+```
+
+This route preserves full tool functionality (`list_folders`, `list_emails`, etc.) while avoiding direct COM startup issues in some client runtimes.
+
 ## How It Works
 
 ```
