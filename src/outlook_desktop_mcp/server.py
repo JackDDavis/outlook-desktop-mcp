@@ -24,6 +24,7 @@ from outlook_desktop_mcp.tools._folder_constants import (
     OL_MAIL_ITEM,
     OL_APPOINTMENT_ITEM,
     OL_FOLDER_CALENDAR,
+    OL_FOLDER_DRAFTS,
     OL_FOLDER_TASKS,
     OL_MEETING,
     OL_MEETING_CANCELED,
@@ -447,6 +448,85 @@ async def send_email(
         return await bridge.call(_send, to, subject, body, cc, bcc, html_body, account)
     except Exception as e:
         return f"Error sending email: {format_com_error(e)}"
+
+
+# =====================================================================
+# TOOL 1b: create_draft
+# =====================================================================
+
+@mcp.tool()
+async def create_draft(
+    subject: str,
+    body: str,
+    to: str = "",
+    cc: str = "",
+    bcc: str = "",
+    html_body: str = "",
+    account: str = "",
+) -> str:
+    """Create a draft email in the Drafts folder without sending it.
+
+    The draft can be reviewed and sent manually by the user in Outlook, or
+    located later via list_emails(folder="drafts"). Useful when the user
+    wants to review an email before sending, or when the agent is not
+    permitted to send directly.
+
+    Args:
+        subject: The email subject line.
+        body: The plain-text body of the email. If html_body is also provided,
+            both are set and Outlook will prefer the HTML version.
+        to: Optional. One or more recipient email addresses, separated by
+            semicolons. Can be left empty for the user to fill in later.
+        cc: Optional. CC recipients, separated by semicolons.
+        bcc: Optional. BCC recipients, separated by semicolons.
+        html_body: Optional. HTML-formatted body. When provided, Outlook renders
+            the email as HTML. The plain-text body serves as fallback.
+        account: Optional. Account display name (or substring) to save the
+            draft under. Default: primary account. Use list_accounts to see
+            available accounts.
+
+    Returns:
+        JSON object with entry_id, subject, and account confirmation.
+    """
+    def _draft(outlook, namespace, subject, body, to, cc, bcc, html_body, account):
+        store = _require_store(namespace, account)
+        # Create draft in the target account's Drafts folder
+        drafts_folder = store.GetDefaultFolder(OL_FOLDER_DRAFTS)
+        mail = drafts_folder.Items.Add("IPM.Note")
+        # Set the sending account
+        for acc in outlook.Session.Accounts:
+            if acc.DeliveryStore.StoreID == store.StoreID:
+                mail._oleobj_.Invoke(*(64209, 0, 8, 0, acc))  # SendUsingAccount
+                break
+        mail.Subject = subject
+        mail.Body = body
+        if to:
+            mail.To = to
+        if cc:
+            mail.CC = cc
+        if bcc:
+            mail.BCC = bcc
+        if html_body:
+            mail.HTMLBody = html_body
+        mail.Save()
+        result = {
+            "status": "Draft created",
+            "entry_id": mail.EntryID,
+            "subject": subject,
+        }
+        if to:
+            result["to"] = to
+        # Resolve account display name
+        for acc in outlook.Session.Accounts:
+            if acc.DeliveryStore.StoreID == store.StoreID:
+                result["account"] = acc.DisplayName
+                break
+        return json.dumps(result)
+
+    try:
+        return await bridge.call(_draft, subject, body, to, cc, bcc, html_body, account)
+    except Exception as e:
+        return f"Error creating draft: {format_com_error(e)}"
 
 
 # =====================================================================
@@ -2304,7 +2384,23 @@ def main():
     parser.add_argument("--http", action="store_true", help="Run HTTP/SSE transport instead of stdio")
     parser.add_argument("--host", default="0.0.0.0", help="Host for HTTP transport (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=3721, help="Port for HTTP transport (default: 3721)")
+    parser.add_argument(
+        "--deny",
+        default="",
+        help="Comma-separated list of tool names to remove (e.g. --deny send_email,reply_email)",
+    )
     args = parser.parse_args()
+
+    # Apply tool deny list before starting
+    if args.deny:
+        denied = [t.strip() for t in args.deny.split(",") if t.strip()]
+        available = set(mcp._tool_manager._tools.keys())
+        unknown = [t for t in denied if t not in available]
+        if unknown:
+            parser.error(f"Unknown tool(s) in --deny: {', '.join(unknown)}")
+        for tool_name in denied:
+            del mcp._tool_manager._tools[tool_name]
+        logger.info("Denied %d tool(s): %s", len(denied), ", ".join(denied))
 
     logger.info("Starting Outlook Desktop MCP server...")
     bridge.start()

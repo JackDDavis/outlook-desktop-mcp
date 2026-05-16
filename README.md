@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 
-**Turn your running Outlook Desktop into an MCP server with 34 tools.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Turn your running Outlook Desktop into an MCP server with 35 tools.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 
 Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session. Multi-account support lets you target any account configured in Outlook.
 
@@ -22,7 +22,7 @@ pip install outlook-desktop-mcp
 claude mcp add outlook-desktop -- outlook-desktop-mcp
 ```
 
-**3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 34 tools are available immediately.
+**3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 35 tools are available immediately.
 
 ## Alternative Transport: stdio → SSE Proxy (recommended for elevated/WSL edge cases)
 
@@ -56,6 +56,23 @@ outlook-desktop-mcp --http --host 0.0.0.0 --port 3721
 
 This route preserves full tool functionality (`list_folders`, `list_emails`, etc.) while avoiding direct COM startup issues in some client runtimes.
 
+## Tool Restrictions (--deny)
+
+Use `--deny` to remove specific tools from the server, preventing agents from calling them. This lets you run different permission levels for different agents:
+
+```bash
+# Read-only agent: no sending, replying, or drafting
+outlook-desktop-mcp --deny send_email,reply_email,create_draft
+
+# Compose-only agent: can draft but not send
+outlook-desktop-mcp --deny send_email,reply_email
+
+# SSE mode with restrictions
+outlook-desktop-mcp --http --deny send_email,reply_email
+```
+
+Tool names are validated at startup — typos cause an immediate error. Use `--deny` in your MCP client config to enforce per-agent restrictions.
+
 ## How It Works
 
 ```
@@ -85,7 +102,7 @@ Internally, the server runs a dedicated COM thread (Single-Threaded Apartment) t
 - **Python 3.12+**
 - **Outlook must be running** when the MCP server starts
 
-## Available Tools (34)
+## Available Tools (35)
 
 All tool descriptions are optimized for LLM tool discovery — Claude understands exactly how to use each one, what arguments to pass, and what to expect back.
 
@@ -97,11 +114,12 @@ Most tools accept an optional `account` parameter to target a specific Outlook a
 |------|-------------|
 | `list_accounts` | List all accounts configured in Outlook with display name and email |
 
-### Email (13 tools)
+### Email (14 tools)
 
 | Tool | Description |
 |------|-------------|
 | `send_email` | Send an email with To/CC/BCC, plain text or HTML body |
+| `create_draft` | Create a draft email in Drafts without sending (for user review) |
 | `list_emails` | List recent emails from any folder, with optional unread filter |
 | `read_email` | Read full email content by entry ID or subject search |
 | `search_emails` | Full-text search across email subjects and bodies |
@@ -222,7 +240,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching strategy and developmen
 ```
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
-    server.py              # MCP server + all 34 tool definitions
+    server.py              # MCP server + all 35 tool definitions
     com_bridge.py          # Async-to-COM threading bridge (60s timeout)
     tools/
       _folder_constants.py # Outlook enums and constants
