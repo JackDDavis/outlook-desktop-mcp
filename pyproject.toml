@@ -5,7 +5,7 @@ description = "Run this on Windows and get Outlook Desktop as an MCP server. No 
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
-    { name = "Andreas Martin Aanerud", email = "user@example.com" },
+    { name = "JackDDavis", email = "24422671+JackDDavis@users.noreply.github.com" },
 ]
 keywords = ["mcp", "outlook", "email", "com", "automation", "windows", "microsoft", "claude"]
 classifiers = [
@@ -23,9 +23,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/aaanerud/outlook-desktop-mcp"
-Repository = "https://github.com/aaanerud/outlook-desktop-mcp"
-Issues = "https://github.com/aaanerud/outlook-desktop-mcp/issues"
+Homepage = "https://github.com/JackDDavis/outlook-desktop-mcp"
+Repository = "https://github.com/JackDDavis/outlook-desktop-mcp"
+Issues = "https://github.com/JackDDavis/outlook-desktop-mcp/issues"
 
 [project.scripts]
 outlook-desktop-mcp = "outlook_desktop_mcp.server:main"

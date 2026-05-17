@@ -7,6 +7,11 @@ build/
 *.egg
 .eggs/
 
+# Environment / secrets
+.env
+*.env
+.env.*
+
 # Claude Code local context (not shared in repo)
 CLAUDE.md
 .claude/
