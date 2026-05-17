@@ -4,9 +4,9 @@
 [![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
 
-**Turn your running Outlook Desktop into an MCP server with 36 tools.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Turn your running Outlook Desktop into an MCP server with 36 tools — including full multi-account support.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 
-Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage your calendar, create tasks, handle attachments, and more — all through your existing Outlook session. Multi-account support lets you target any account configured in Outlook.
+Works with Claude Code, Claude Desktop, GitHub Copilot, OpenAI Codex, OpenClaw, and any MCP-compatible agent. Send emails, manage your calendar, create tasks, handle attachments, and more — across every email account configured in Outlook, with a single `account` parameter to target any of them.
 
 ## Quick Start
 
@@ -16,13 +16,79 @@ Any MCP client (Claude Code, Claude Desktop, etc.) can then send emails, manage 
 pip install outlook-desktop-mcp
 ```
 
-**2. Register with Claude Code:**
+**2. Register with your agent:**
+
+<details>
+<summary>Claude Code</summary>
 
 ```bash
 claude mcp add outlook-desktop -- outlook-desktop-mcp
 ```
+</details>
 
-**3. Open Outlook Desktop (Classic) and start a Claude Code session.** That's it — 36 tools are available immediately.
+<details>
+<summary>Claude Desktop</summary>
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "outlook-desktop": {
+      "command": "outlook-desktop-mcp"
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary>GitHub Copilot (VS Code)</summary>
+
+Add to `.vscode/mcp.json` or user MCP settings:
+
+```json
+{
+  "servers": {
+    "outlook-desktop": {
+      "type": "stdio",
+      "command": "outlook-desktop-mcp"
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary>OpenAI Codex</summary>
+
+```bash
+codex mcp add --name outlook-desktop --command outlook-desktop-mcp
+```
+</details>
+
+<details>
+<summary>OpenClaw (SSE mode — recommended)</summary>
+
+Start the server in SSE mode, then add to your OpenClaw MCP config:
+
+```bash
+outlook-desktop-mcp --http --host 127.0.0.1 --port 3721
+```
+
+```json
+{
+  "mcpServers": {
+    "outlook-desktop": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3721/sse"
+    }
+  }
+}
+```
+</details>
+
+**3. Open Outlook Desktop (Classic) and start a session.** That's it — 36 tools are available immediately.
 
 ## Alternative Transport: stdio → SSE Proxy (recommended for elevated/WSL edge cases)
 
@@ -95,7 +161,7 @@ outlook-desktop-mcp --http --deny send_email,reply_email
 ## How It Works
 
 ```
-Claude Code / Claude Desktop / Any MCP Client
+Claude Code / Claude Desktop / GitHub Copilot / Codex / OpenClaw / Any MCP Client
     |
     | stdio (JSON-RPC)
     v
@@ -208,7 +274,7 @@ List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `lis
 ## Install from Source
 
 ```bash
-git clone https://github.com/Aanerud/outlook-desktop-mcp.git
+git clone https://github.com/JackDDavis/outlook-desktop-mcp.git
 cd outlook-desktop-mcp
 python -m venv .venv
 .venv\Scripts\activate
