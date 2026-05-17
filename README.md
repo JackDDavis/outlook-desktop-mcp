@@ -3,6 +3,11 @@
 [![PyPI](https://img.shields.io/pypi/v/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/outlook-desktop-mcp)](https://pypi.org/project/outlook-desktop-mcp/)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue)]()
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+
+> **Fork of [Aanerud/outlook-desktop-mcp](https://github.com/Aanerud/outlook-desktop-mcp)** with
+> multi-account support, bulk operations, agent permission controls (`--deny`), and efficiency
+> improvements (`include_body`). See upstream for macOS support.
 
 **Turn your running Outlook Desktop into an MCP server with 36 tools — including full multi-account support.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 

@@ -15,3 +15,12 @@ build/
 # Claude Code local context (not shared in repo)
 CLAUDE.md
 .claude/
+
+# IDE and OS artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.log
