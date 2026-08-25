@@ -345,3 +345,34 @@ def test_filter_selected_work_over_ten_uses_ordered_sub_batches(
         [make_entry_id(index + 1) for index in range(10, 20)],
         [make_entry_id(index + 1) for index in range(20, 25)],
     ]
+
+
+def test_explicit_identifiers_are_not_silently_capped_by_count(
+    monkeypatch,
+    tmp_path,
+):
+    items = [
+        FakeMailItem(make_entry_id(index + 1))
+        for index in range(60)
+    ]
+    monkeypatch.setattr(
+        server,
+        "bridge",
+        BatchingBridge(MappingNamespace(items)),
+    )
+    monkeypatch.setattr(
+        server,
+        "operation_manager",
+        OperationManager(tmp_path, process_instance_id="all-explicit-ids"),
+    )
+
+    payload = json.loads(asyncio.run(server.bulk_mark_as_read(
+        entry_ids=",".join(item.EntryID for item in items),
+        count=10,
+    )))
+
+    assert payload["summary"]["total"] == 60
+    assert payload["summary"]["ok"] == 60
+    assert [row["id"] for row in payload["results"]] == [
+        item.EntryID for item in items
+    ]

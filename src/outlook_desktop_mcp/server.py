@@ -596,7 +596,7 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
     failures = []
 
     if parsed_ids:
-        for identifier in parsed_ids[:count]:
+        for identifier in parsed_ids:
             try:
                 item = _resolve_email_item(
                     namespace,
@@ -749,7 +749,7 @@ def _operation_budget_seconds() -> float:
 def _initial_bulk_remaining(entry_ids: str, count: int) -> int:
     limit = min(max(1, count), 100)
     parsed_ids = _parse_entry_ids(entry_ids)
-    return min(len(parsed_ids), limit) if parsed_ids else limit
+    return len(parsed_ids) if parsed_ids else limit
 
 
 async def _bulk_bridge_call(function, *args, request_name: str):
