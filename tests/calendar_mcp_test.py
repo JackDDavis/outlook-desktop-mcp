@@ -49,13 +49,13 @@ async def run_tests():
                 tools_result = await session.list_tools()
                 tool_names = [t.name for t in tools_result.tools]
                 calendar_tools = [
-                    "list_events", "get_event", "create_event",
+                    "list_calendars", "list_events", "get_event", "create_event",
                     "create_meeting", "update_event", "delete_event",
-                    "respond_to_meeting", "search_events",
+                    "move_event", "respond_to_meeting", "search_events",
                 ]
                 missing = [n for n in calendar_tools if n not in tool_names]
                 assert not missing, f"Missing calendar tools: {missing}"
-                log(f"  All 8 calendar tools present (total tools: {len(tool_names)})")
+                log(f"  All 10 calendar tools present (total tools: {len(tool_names)})")
                 passed += 1
                 log("  PASS")
             except Exception as e:

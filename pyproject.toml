@@ -1,6 +1,6 @@
 [project]
 name = "outlook-desktop-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Run this on Windows and get Outlook Desktop as an MCP server. No Graph API, no Entra app registration — just your local Outlook."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "pywin32>=310",
-    "mcp[cli]>=1.26.0",
+    "mcp[cli]>=1.26.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +45,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/outlook_desktop_mcp"]
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]

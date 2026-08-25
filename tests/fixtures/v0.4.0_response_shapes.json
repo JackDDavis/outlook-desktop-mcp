@@ -1,0 +1,39 @@
+{
+  "version": "0.4.0",
+  "transport_content_type": "text",
+  "list_email_fields": [
+    "entry_id",
+    "subject",
+    "sender",
+    "sender_name",
+    "received_time",
+    "unread",
+    "has_attachments",
+    "attachment_count"
+  ],
+  "bulk_fields": [
+    "matched_count",
+    "processed_count",
+    "success_count",
+    "failure_count",
+    "results"
+  ],
+  "bulk_result_fields": [
+    "entry_id",
+    "subject",
+    "success"
+  ],
+  "create_event_fields": [
+    "status",
+    "subject",
+    "start",
+    "end",
+    "entry_id",
+    "account",
+    "calendar",
+    "calendar_path",
+    "is_default",
+    "local_only"
+  ],
+  "legacy_error_format": "plain text or JSON object with an error string"
+}

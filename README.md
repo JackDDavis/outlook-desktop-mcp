@@ -192,11 +192,17 @@ Internally, the server runs a dedicated COM thread (Single-Threaded Apartment) t
 - **Python 3.12+**
 - **Outlook must be running** when the MCP server starts
 
-## Available Tools (36)
+## Available Tools (38)
 
 All tool descriptions are optimized for LLM tool discovery — Claude understands exactly how to use each one, what arguments to pass, and what to expect back.
 
 Most tools accept an optional `account` parameter to target a specific Outlook account (e.g., `"work@company.com"`). If omitted, the default account is used.
+
+Calendar tools also accept an optional `calendar` name/path where relevant.
+Call `list_calendars` before writing when synchronization matters. Outlook
+folders named `Calendar (This computer only)` are local-only and do not sync to
+the provider; writes to them are blocked unless `allow_local_only=true` is
+explicitly supplied.
 
 List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `list_tasks`) accept an optional `include_body` parameter. When true, results include a ~300 char body preview, To/CC, and categories inline — eliminating the need for follow-up detail calls during triage.
 
@@ -226,18 +232,49 @@ List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `lis
 | `bulk_move_emails` | Move multiple emails to a folder in a single call |
 | `bulk_read_emails` | Read full content of multiple emails in a single call |
 
-### Calendar (8 tools)
+### Calendar (10 tools)
 
 | Tool | Description |
 |------|-------------|
+| `list_calendars` | List calendar folders with default and local-only status |
 | `list_events` | List upcoming events with recurring occurrence support |
 | `get_event` | Read full event details by entry ID |
-| `create_event` | Create a personal calendar appointment |
+| `create_event` | Create a personal appointment directly in a selected calendar |
 | `create_meeting` | Create a meeting and send invitations to attendees |
 | `update_event` | Modify an existing event's subject, time, location, etc. |
 | `delete_event` | Delete an appointment or cancel a meeting (sends notices) |
+| `move_event` | Move an existing event between account/calendar stores without recreating it |
 | `respond_to_meeting` | Accept, decline, or tentatively accept a meeting invite |
 | `search_events` | Search calendar events by keyword within a date range |
+
+#### Calendar safety and time semantics
+
+- Omitting `account` continues to target Outlook's primary account.
+- `create_event` resolves the account and calendar before creating anything,
+  then creates directly in that folder. It no longer creates in the primary
+  calendar and moves afterward.
+- Local-only calendar writes require `allow_local_only=true`.
+- Naive ISO values are interpreted as the Windows host's local Outlook time.
+  Offset/Z values are converted to host-local time before COM assignment.
+- Event end must be later than start. All-day values must be aligned to
+  midnight; use the next date as the exclusive end for a one-day event.
+- Calendar validation and COM failures are MCP tool errors (`isError=true`),
+  not successful strings beginning with `Error`.
+- `list_events` and `search_events` accept `count` from 1 through 1000. Set
+  `include_meta=true` to receive `{events, count, truncated}` instead of a
+  bare array.
+
+Example:
+
+```json
+{
+  "account": "work@example.com",
+  "calendar": "Calendar/Projects",
+  "subject": "Planning",
+  "start": "2026-08-12T09:00:00-04:00",
+  "end": "2026-08-12T10:00:00-04:00"
+}
+```
 
 ### Tasks (5 tools)
 

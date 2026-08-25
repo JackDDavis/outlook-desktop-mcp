@@ -29,17 +29,17 @@ class OutlookBridge:
         self._shutdown = threading.Event()
         self._init_error: Exception | None = None
 
-    def start(self):
+    def start(self, timeout: int = 60):
         """Start the COM thread. Call once at server startup."""
         self._thread = threading.Thread(
             target=self._com_thread_main, daemon=True, name="outlook-com"
         )
         self._thread.start()
-        if not self._ready.wait(timeout=15):
+        if not self._ready.wait(timeout=timeout):
             if self._init_error:
                 raise self._init_error
             raise RuntimeError(
-                "Outlook COM thread failed to initialize within 15s. "
+                f"Outlook COM thread failed to initialize within {timeout}s. "
                 "Is Outlook Desktop (Classic) running?"
             )
 
@@ -50,7 +50,14 @@ class OutlookBridge:
 
         pythoncom.CoInitialize()
         try:
-            self._outlook = win32com.client.Dispatch("Outlook.Application")
+            try:
+                self._outlook = win32com.client.GetActiveObject(
+                    "Outlook.Application"
+                )
+                logger.debug("Attached to the running Outlook COM instance")
+            except pythoncom.com_error:
+                self._outlook = win32com.client.Dispatch("Outlook.Application")
+                logger.debug("Started a new Outlook COM automation instance")
             self._namespace = self._outlook.GetNamespace("MAPI")
             store_name = self._namespace.DefaultStore.DisplayName
             user_name = self._namespace.CurrentUser.Name

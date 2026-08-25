@@ -13,6 +13,7 @@ import logging
 import re
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from outlook_desktop_mcp.com_bridge import OutlookBridge
 from datetime import datetime, timedelta
@@ -25,6 +26,7 @@ from outlook_desktop_mcp.tools._folder_constants import (
     OL_APPOINTMENT_ITEM,
     OL_FOLDER_CALENDAR,
     OL_FOLDER_DRAFTS,
+    OL_FOLDER_INBOX,
     OL_FOLDER_TASKS,
     OL_MEETING,
     OL_MEETING_CANCELED,
@@ -132,11 +134,40 @@ def _resolve_store(namespace, account: str = ""):
         return namespace.DefaultStore
 
     account_lower = account.lower().strip()
+    exact = []
+    partial = []
+    address_by_store = {}
+    try:
+        for i in range(namespace.Accounts.Count):
+            outlook_account = namespace.Accounts.Item(i + 1)
+            address_by_store[outlook_account.DeliveryStore.StoreID] = (
+                getattr(outlook_account, "SmtpAddress", "") or ""
+            ).lower().strip()
+    except Exception:
+        pass
     for i in range(namespace.Stores.Count):
         store = namespace.Stores.Item(i + 1)
-        if account_lower in store.DisplayName.lower():
-            return store
+        display_name = store.DisplayName.lower().strip()
+        aliases = {
+            display_name,
+            address_by_store.get(store.StoreID, ""),
+        } - {""}
+        if account_lower in aliases:
+            exact.append(store)
+        elif any(account_lower in alias for alias in aliases):
+            partial.append(store)
 
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise ValueError(f"Account selector '{account}' is ambiguous.")
+    if len(partial) == 1:
+        return partial[0]
+    if len(partial) > 1:
+        names = ", ".join(store.DisplayName for store in partial)
+        raise ValueError(
+            f"Account selector '{account}' is ambiguous. Matches: {names}"
+        )
     return None
 
 
@@ -176,6 +207,12 @@ def _resolve_folder(namespace, folder_name: str, store=None):
     """
     folder_name = folder_name.strip()
     store = store or namespace.DefaultStore
+
+    # Email-address: treat as account name and return its inbox
+    if "@" in folder_name:
+        matched_store = _resolve_store(namespace, folder_name)
+        if matched_store:
+            return matched_store.GetDefaultFolder(OL_FOLDER_INBOX)
 
     # Slash-delimited path: traverse segment by segment
     if "/" in folder_name:
@@ -373,11 +410,23 @@ async def list_accounts() -> str:
     """
     def _list(outlook, namespace):
         default_id = namespace.DefaultStore.StoreID
+        addresses = {}
+        for i in range(outlook.Session.Accounts.Count):
+            try:
+                account = outlook.Session.Accounts.Item(i + 1)
+                store_id = account.DeliveryStore.StoreID
+                address = getattr(account, "SmtpAddress", "") or ""
+                if not address and "@" in account.DisplayName:
+                    address = account.DisplayName
+                addresses[store_id] = address
+            except Exception:
+                continue
         results = []
         for i in range(namespace.Stores.Count):
             store = namespace.Stores.Item(i + 1)
             results.append({
                 "display_name": store.DisplayName,
+                "email": addresses.get(store.StoreID, ""),
                 "store_id": store.StoreID,
                 "is_default": store.StoreID == default_id,
             })
@@ -977,7 +1026,7 @@ async def list_folders(folder: str = "", max_depth: int = 3, account: str = "") 
                 folders.append(walk(child, 1, base_path))
             except Exception:
                 continue
-        return json.dumps(folders, indent=2, default=str)
+        return json.dumps({"account": store.DisplayName, "folders": folders}, indent=2, default=str)
 
     try:
         return await bridge.call(_list, folder, max_depth, account)
@@ -1427,11 +1476,190 @@ async def bulk_move_emails(
 # =====================================================================
 
 
-# --- Helper: parse ISO date string ---
+# --- Calendar helpers ---
 
-def _parse_date(date_str: str) -> datetime:
-    """Parse ISO 8601 date string like '2026-02-25 14:00' or '2026-02-25T14:00:00'."""
-    return datetime.fromisoformat(date_str)
+MAX_CALENDAR_RESULTS = 1000
+LOCAL_ONLY_MARKER = "(this computer only)"
+
+
+def _parse_date(date_str: str | datetime) -> datetime:
+    """Parse ISO 8601 and normalize aware values to the Windows local timezone."""
+    if isinstance(date_str, datetime):
+        parsed = date_str
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    if not date_str or not date_str.strip():
+        raise ValueError("Date/time value must not be empty.")
+    value = date_str.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid ISO 8601 date/time: '{date_str}'."
+        ) from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _validate_calendar_interval(start: str, end: str,
+                                all_day: bool = False) -> tuple[datetime, datetime]:
+    start_dt = _parse_date(start)
+    end_dt = _parse_date(end)
+    if end_dt <= start_dt:
+        raise ValueError("Event end must be later than event start.")
+    if all_day:
+        midnight = datetime.min.time()
+        if start_dt.time() != midnight or end_dt.time() != midnight:
+            raise ValueError(
+                "All-day event start and end must be date-aligned at midnight."
+            )
+    return start_dt, end_dt
+
+
+def _validate_result_count(count: int) -> int:
+    if count < 1 or count > MAX_CALENDAR_RESULTS:
+        raise ValueError(
+            f"count must be between 1 and {MAX_CALENDAR_RESULTS}."
+        )
+    return count
+
+
+def _calendar_path(folder) -> str:
+    path = getattr(folder, "FolderPath", "") or getattr(folder, "Name", "")
+    return str(path).lstrip("\\").replace("\\", "/")
+
+
+def _is_local_only_calendar(folder) -> bool:
+    text = f"{getattr(folder, 'Name', '')} {_calendar_path(folder)}".lower()
+    return LOCAL_ONLY_MARKER in text
+
+
+def _calendar_candidates(store):
+    default = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
+    candidates = []
+    seen = set()
+
+    def add(folder):
+        key = getattr(folder, "EntryID", None) or _calendar_path(folder).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(folder)
+
+    add(default)
+
+    def walk(parent):
+        for i in range(parent.Folders.Count):
+            try:
+                child = parent.Folders.Item(i + 1)
+                if getattr(child, "DefaultItemType", None) == OL_APPOINTMENT_ITEM:
+                    add(child)
+                walk(child)
+            except Exception:
+                continue
+
+    walk(store.GetRootFolder())
+    return candidates
+
+
+def _resolve_calendar(namespace, account: str = "", calendar: str = "",
+                      allow_local_only: bool = True):
+    store = _require_store(namespace, account)
+    default = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
+    if not calendar.strip():
+        selected = default
+    else:
+        selector = calendar.lower().strip().replace("\\", "/")
+        exact = []
+        partial = []
+        for candidate in _calendar_candidates(store):
+            names = {
+                str(candidate.Name).lower().strip(),
+                _calendar_path(candidate).lower().strip(),
+            }
+            if selector in names:
+                exact.append(candidate)
+            elif any(selector in name for name in names):
+                partial.append(candidate)
+        matches = exact or partial
+        unique = {
+            getattr(candidate, "EntryID", _calendar_path(candidate)): candidate
+            for candidate in matches
+        }
+        if len(unique) != 1:
+            if not unique:
+                raise ValueError(
+                    f"Calendar '{calendar}' not found in account "
+                    f"'{store.DisplayName}'. Use list_calendars first."
+                )
+            names = ", ".join(candidate.Name for candidate in unique.values())
+            raise ValueError(
+                f"Calendar selector '{calendar}' is ambiguous. Matches: {names}"
+            )
+        selected = next(iter(unique.values()))
+
+    local_only = _is_local_only_calendar(selected)
+    if local_only and not allow_local_only:
+        raise ValueError(
+            f"Calendar '{selected.Name}' is local-only and does not synchronize. "
+            "Set allow_local_only=true to opt in explicitly."
+        )
+    return store, selected, (
+        getattr(selected, "EntryID", None) == getattr(default, "EntryID", None)
+    ), local_only
+
+
+def _calendar_context(store, folder, is_default: bool,
+                      local_only: bool) -> dict:
+    return {
+        "account": store.DisplayName,
+        "calendar": folder.Name,
+        "calendar_path": _calendar_path(folder),
+        "is_default": is_default,
+        "local_only": local_only,
+    }
+
+
+# =====================================================================
+# TOOL 9b: list_calendars
+# =====================================================================
+
+@mcp.tool()
+async def list_calendars(account: str = "") -> str:
+    """List calendar folders for an Outlook account.
+
+    Returns each calendar's name/path, whether it is the account default,
+    item count, and whether Outlook marks it as local-only. Use this before
+    calendar writes when synchronization matters.
+
+    Args:
+        account: Optional account display name, email, or unique substring.
+            Default: primary account.
+    """
+    def _list(outlook, namespace, account):
+        store = _require_store(namespace, account)
+        default = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
+        default_id = getattr(default, "EntryID", None)
+        results = []
+        for folder in _calendar_candidates(store):
+            results.append({
+                **_calendar_context(
+                    store,
+                    folder,
+                    getattr(folder, "EntryID", None) == default_id,
+                    _is_local_only_calendar(folder),
+                ),
+                "entry_id": getattr(folder, "EntryID", ""),
+                "item_count": folder.Items.Count,
+            })
+        return json.dumps(results, indent=2, default=str)
+
+    try:
+        return await bridge.call(_list, account)
+    except Exception as e:
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1445,6 +1673,8 @@ async def list_events(
     count: int = 20,
     include_body: bool = False,
     account: str = "",
+    calendar: str = "",
+    include_meta: bool = False,
 ) -> str:
     """List upcoming calendar events from Outlook.
 
@@ -1465,15 +1695,21 @@ async def list_events(
             for each event. Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
+        calendar: Optional calendar name/path. Default: the account's default
+            calendar. Use list_calendars to discover calendars.
+        include_meta: If true, return an object containing events, count, and
+            truncated. Default false preserves the JSON-array response.
 
     Returns:
         JSON array of event summary objects.
     """
-    def _list(outlook, namespace, start_date, end_date, count, include_body, account):
-        count = min(max(1, count), 200)
-        store = _require_store(namespace, account)
-        calendar = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
-        items = calendar.Items
+    def _list(outlook, namespace, start_date, end_date, count, include_body,
+              account, calendar, include_meta):
+        count = _validate_result_count(count)
+        _, selected, _, _ = _resolve_calendar(
+            namespace, account, calendar, allow_local_only=True
+        )
+        items = selected.Items
 
         # CRITICAL ORDER: Sort BEFORE IncludeRecurrences BEFORE Restrict
         items.Sort("[Start]")
@@ -1489,22 +1725,29 @@ async def list_events(
         filtered = items.Restrict(restrict)
 
         results = []
-        n = 0
+        truncated = False
         for item in filtered:
-            n += 1
+            if len(results) >= count:
+                truncated = True
+                break
             try:
                 results.append(format_event_summary(item, include_body=include_body))
             except Exception:
                 continue
-            if n >= count:
-                break
 
-        return json.dumps(results, indent=2, default=str)
+        payload = (
+            {"events": results, "count": len(results), "truncated": truncated}
+            if include_meta else results
+        )
+        return json.dumps(payload, indent=2, default=str)
 
     try:
-        return await bridge.call(_list, start_date, end_date, count, include_body, account)
+        return await bridge.call(
+            _list, start_date, end_date, count, include_body, account,
+            calendar, include_meta,
+        )
     except Exception as e:
-        return f"Error listing events: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1533,12 +1776,14 @@ async def get_event(entry_id: str, account: str = "") -> str:
             item = namespace.GetItemFromID(entry_id, store.StoreID)
         else:
             item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
+            raise ValueError(err)
         return json.dumps(format_event_full(item), indent=2, default=str)
 
     try:
         return await bridge.call(_get, entry_id, account)
     except Exception as e:
-        return f"Error reading event: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1555,6 +1800,8 @@ async def create_event(
     all_day: bool = False,
     reminder_minutes: int = 15,
     account: str = "",
+    calendar: str = "",
+    allow_local_only: bool = False,
 ) -> str:
     """Create a personal calendar appointment (no attendees).
 
@@ -1577,22 +1824,24 @@ async def create_event(
             Default 15. Set to 0 to disable reminder.
         account: Optional. Account display name (or substring) to create
             the event in. Default: primary account.
+        calendar: Optional calendar name/path within the selected account.
+            Default: the account's default calendar.
+        allow_local_only: Explicitly permit a calendar marked
+            "(This computer only)". Default false.
 
     Returns:
         Confirmation with event subject and entry_id, or an error.
     """
     def _create(outlook, namespace, subject, start, end, location, body,
-                all_day, reminder_minutes, account):
-        appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
-        # Move to correct store's calendar if account specified
-        if account:
-            store = _require_store(namespace, account)
-            cal = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
-            appt.Move(cal)
-            appt = namespace.GetItemFromID(appt.EntryID)
+                all_day, reminder_minutes, account, calendar, allow_local_only):
+        start_dt, end_dt = _validate_calendar_interval(start, end, all_day)
+        store, selected, is_default, local_only = _resolve_calendar(
+            namespace, account, calendar, allow_local_only=allow_local_only
+        )
+        appt = selected.Items.Add("IPM.Appointment")
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = start_dt
+        appt.End = end_dt
         if location:
             appt.Location = location
         if body:
@@ -1610,15 +1859,16 @@ async def create_event(
             "start": str(appt.Start),
             "end": str(appt.End),
             "entry_id": appt.EntryID,
+            **_calendar_context(store, selected, is_default, local_only),
         }, indent=2, default=str)
 
     try:
         return await bridge.call(
             _create, subject, start, end, location, body, all_day,
-            reminder_minutes, account,
+            reminder_minutes, account, calendar, allow_local_only,
         )
     except Exception as e:
-        return f"Error creating event: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1635,6 +1885,8 @@ async def create_meeting(
     body: str = "",
     optional_attendees: str = "",
     account: str = "",
+    calendar: str = "",
+    allow_local_only: bool = False,
 ) -> str:
     """Create a meeting and send invitations to attendees.
 
@@ -1655,23 +1907,35 @@ async def create_meeting(
             by semicolons.
         account: Optional. Account display name (or substring) to send from.
             Default: primary account. Use list_accounts to see available accounts.
+        calendar: Optional calendar name/path. Meetings must use the selected
+            account's default calendar.
+        allow_local_only: Explicitly permit a local-only default calendar.
+            Default false.
 
     Returns:
         Confirmation that the meeting was created and invitations sent.
     """
     def _create(outlook, namespace, subject, start, end, required_attendees,
-                location, body, optional_attendees, account):
-        appt = outlook.CreateItem(OL_APPOINTMENT_ITEM)
+                location, body, optional_attendees, account, calendar,
+                allow_local_only):
+        start_dt, end_dt = _validate_calendar_interval(start, end)
+        store, selected, is_default, local_only = _resolve_calendar(
+            namespace, account, calendar, allow_local_only=allow_local_only
+        )
+        if not is_default:
+            raise ValueError(
+                "Meetings must be created in the selected account's default "
+                "calendar."
+            )
+        appt = selected.Items.Add("IPM.Appointment")
         # Set sending account
-        if account:
-            store = _require_store(namespace, account)
-            for acc in outlook.Session.Accounts:
-                if acc.DeliveryStore.StoreID == store.StoreID:
-                    appt._oleobj_.Invoke(*(64209, 0, 8, 0, acc))
-                    break
+        for acc in outlook.Session.Accounts:
+            if acc.DeliveryStore.StoreID == store.StoreID:
+                appt._oleobj_.Invoke(*(64209, 0, 8, 0, acc))
+                break
         appt.Subject = subject
-        appt.Start = start
-        appt.End = end
+        appt.Start = start_dt
+        appt.End = end_dt
         appt.MeetingStatus = OL_MEETING
         if location:
             appt.Location = location
@@ -1693,18 +1957,20 @@ async def create_meeting(
 
         appt.Recipients.ResolveAll()
         appt.Send()
-        return (
-            f"Meeting '{subject}' created and invitations sent to "
-            f"{required_attendees}"
-        )
+        return json.dumps({
+            "status": "sent",
+            "subject": subject,
+            "entry_id": getattr(appt, "EntryID", ""),
+            **_calendar_context(store, selected, is_default, local_only),
+        }, indent=2, default=str)
 
     try:
         return await bridge.call(
             _create, subject, start, end, required_attendees, location, body,
-            optional_attendees, account,
+            optional_attendees, account, calendar, allow_local_only,
         )
     except Exception as e:
-        return f"Error creating meeting: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1747,13 +2013,19 @@ async def update_event(
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
-            return err
+            raise ValueError(err)
+        next_start = _parse_date(start) if start else _parse_date(item.Start)
+        next_end = _parse_date(end) if end else _parse_date(item.End)
+        _validate_calendar_interval(
+            next_start.isoformat(), next_end.isoformat(),
+            bool(getattr(item, "AllDayEvent", False)),
+        )
         if subject:
             item.Subject = subject
         if start:
-            item.Start = start
+            item.Start = next_start
         if end:
-            item.End = end
+            item.End = next_end
         if location:
             item.Location = location
         if body:
@@ -1773,7 +2045,7 @@ async def update_event(
             _update, entry_id, subject, start, end, location, body, account,
         )
     except Exception as e:
-        return f"Error updating event: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1804,7 +2076,7 @@ async def delete_event(entry_id: str, account: str = "") -> str:
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
         meeting_status = item.MeetingStatus
 
@@ -1821,7 +2093,93 @@ async def delete_event(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_delete, entry_id, account)
     except Exception as e:
-        return f"Error deleting event: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
+
+
+# =====================================================================
+# TOOL 15b: move_event
+# =====================================================================
+
+@mcp.tool()
+async def move_event(
+    entry_id: str,
+    target_account: str,
+    source_account: str = "",
+    target_calendar: str = "",
+    allow_local_only: bool = False,
+) -> str:
+    """Move a calendar event between Outlook account stores.
+
+    Moves the existing AppointmentItem rather than recreating it, preserving
+    meeting metadata, attendees, response state, recurrence, reminders, and
+    other properties that create_event cannot reproduce.
+
+    Args:
+        entry_id: The unique Outlook EntryID of the event to move.
+        target_account: Account display name (or unique substring) whose
+            default Calendar should receive the event.
+        source_account: Optional source account display name (or substring).
+            Provide this when moving across stores so the EntryID is resolved
+            against the correct source store.
+        target_calendar: Optional target calendar name/path. Default: the
+            target account's default calendar.
+        allow_local_only: Explicitly permit a local-only target calendar.
+            Default false.
+
+    Returns:
+        JSON confirmation with the moved event's new EntryID and target account.
+    """
+    def _move(outlook, namespace, entry_id, target_account, source_account,
+              target_calendar, allow_local_only):
+        if source_account:
+            source_store = _require_store(namespace, source_account)
+            item = namespace.GetItemFromID(entry_id, source_store.StoreID)
+        else:
+            source_store = None
+            item = namespace.GetItemFromID(entry_id)
+        if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
+            raise ValueError(err)
+
+        target_store, selected, is_default, local_only = _resolve_calendar(
+            namespace, target_account, target_calendar,
+            allow_local_only=allow_local_only,
+        )
+        current_parent = getattr(item, "Parent", None)
+        if (
+            current_parent is not None
+            and getattr(current_parent, "EntryID", None)
+            == getattr(selected, "EntryID", None)
+        ):
+            raise ValueError("Event is already in the target calendar.")
+
+        old_entry_id = item.EntryID
+        subject = item.Subject
+        moved = item.Move(selected)
+        moved_parent = getattr(moved, "Parent", None)
+        if (
+            moved_parent is not None
+            and getattr(moved_parent, "EntryID", None)
+            != getattr(selected, "EntryID", None)
+        ):
+            raise RuntimeError("Outlook did not place the event in the target calendar.")
+        return json.dumps({
+            "status": "moved",
+            "subject": subject,
+            "old_entry_id": old_entry_id,
+            "entry_id": moved.EntryID,
+            "source_account": (
+                source_store.DisplayName if source_store is not None else ""
+            ),
+            **_calendar_context(target_store, selected, is_default, local_only),
+        }, indent=2, default=str)
+
+    try:
+        return await bridge.call(
+            _move, entry_id, target_account, source_account,
+            target_calendar, allow_local_only,
+        )
+    except Exception as e:
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1858,7 +2216,10 @@ async def respond_to_meeting(
         }
         response_lower = response.lower().strip()
         if response_lower not in response_map:
-            return f"Error: response must be 'accept', 'decline', or 'tentative'. Got: '{response}'"
+            raise ValueError(
+                "response must be 'accept', 'decline', or 'tentative'. "
+                f"Got: '{response}'"
+            )
 
         if account:
             store = _require_store(namespace, account)
@@ -1866,7 +2227,7 @@ async def respond_to_meeting(
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_APPOINTMENT, "appointment/meeting item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
         response_item = item.Respond(response_map[response_lower])
         response_item.Send()
@@ -1875,7 +2236,7 @@ async def respond_to_meeting(
     try:
         return await bridge.call(_respond, entry_id, response, account)
     except Exception as e:
-        return f"Error responding to meeting: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================
@@ -1890,6 +2251,8 @@ async def search_events(
     count: int = 10,
     include_body: bool = False,
     account: str = "",
+    calendar: str = "",
+    include_meta: bool = False,
 ) -> str:
     """Search for calendar events by keyword.
 
@@ -1907,15 +2270,21 @@ async def search_events(
             for each result. Default false.
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
+        calendar: Optional calendar name/path. Default: the account's default
+            calendar. Use list_calendars to discover calendars.
+        include_meta: If true, return an object containing events, count, and
+            truncated. Default false preserves the JSON-array response.
 
     Returns:
         JSON array of matching event summaries.
     """
-    def _search(outlook, namespace, query, start_date, end_date, count, include_body, account):
-        count = min(max(1, count), 200)
-        store = _require_store(namespace, account)
-        calendar = store.GetDefaultFolder(OL_FOLDER_CALENDAR)
-        items = calendar.Items
+    def _search(outlook, namespace, query, start_date, end_date, count,
+                include_body, account, calendar, include_meta):
+        count = _validate_result_count(count)
+        _, selected, _, _ = _resolve_calendar(
+            namespace, account, calendar, allow_local_only=True
+        )
+        items = selected.Items
         items.Sort("[Start]")
         items.IncludeRecurrences = True
 
@@ -1930,21 +2299,30 @@ async def search_events(
 
         query_lower = query.lower()
         results = []
+        truncated = False
         for item in filtered:
             if query_lower in (item.Subject or "").lower():
+                if len(results) >= count:
+                    truncated = True
+                    break
                 try:
                     results.append(format_event_summary(item, include_body=include_body))
                 except Exception:
                     continue
-                if len(results) >= count:
-                    break
 
-        return json.dumps(results, indent=2, default=str)
+        payload = (
+            {"events": results, "count": len(results), "truncated": truncated}
+            if include_meta else results
+        )
+        return json.dumps(payload, indent=2, default=str)
 
     try:
-        return await bridge.call(_search, query, start_date, end_date, count, include_body, account)
+        return await bridge.call(
+            _search, query, start_date, end_date, count, include_body,
+            account, calendar, include_meta,
+        )
     except Exception as e:
-        return f"Error searching events: {format_com_error(e)}"
+        raise ToolError(_error_text(e)) from e
 
 
 # =====================================================================

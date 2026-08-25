@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] — 2026-08-11
+
+### Added
+- `list_calendars` with default-calendar, folder-path, item-count, and
+  local-only metadata
+- `move_event` for metadata-preserving cross-store calendar moves
+- Explicit `calendar` selectors and `allow_local_only` write opt-in
+- Optional `include_meta` listing responses with truncation status
+- Hermetic fake-COM calendar safety tests
+
+### Changed
+- Calendar writes resolve and validate their destination before creating a COM
+  item
+- `create_event` creates directly in the selected calendar rather than saving
+  in the primary store and moving afterward
+- Timezone-aware ISO values are converted to Windows local time consistently
+- Calendar interval validation is shared across create, meeting, and update
+- Calendar failures now surface as MCP-native tool errors
+- Calendar list/search limits are explicit and support up to 1000 results
+- Account resolution prefers exact display-name/email matches and rejects
+  ambiguous substrings
+- COM bridge startup now allows 60 seconds, matching operation timeouts and
+  avoiding false startup failures while Outlook is busy initializing
+- COM bridge startup attaches to the running Outlook COM object before falling
+  back to `Dispatch`, avoiding hangs while a visible Outlook session is active
+- Package version bumped to 0.4.0
+
+### Fixed
+- **`create_event` COM 0x80020009 error** — date strings are now normalized through `_parse_date().strftime()` before being assigned to Outlook COM, accepting ISO 8601 variants (with T/Z separators) that COM would otherwise reject
+- **`create_event` cross-account placement** — replaced `CreateItem()` + unsaved `Move()` pattern with `CreateItem()` → set properties → `Save()` → `Move()`; moving an unsaved item caused Outlook to silently land it in the wrong store
+- **`_resolve_folder` email-address routing** — folder names containing `@` are now resolved as account names (returning that account's inbox), so `list_emails(folder="user@gmail.com")` works without needing a separate `account` parameter
+- **`list_folders` missing account context** — response now includes `"account"` field (store display name) so agents know which mailbox the folder tree belongs to
+
+### Added
+- `tests/sse_calendar_test.py` — live SSE integration test for `create_event`, `get_event`, `list_folders` account context, and `delete_event`
+
 ## [0.3.0] — 2025-05-16
 
 ### Added
