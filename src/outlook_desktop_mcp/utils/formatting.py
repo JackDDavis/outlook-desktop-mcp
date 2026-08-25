@@ -3,10 +3,10 @@ import re
 
 from outlook_desktop_mcp.tools._folder_constants import (
     BUSY_STATUS_NAMES,
+    IMPORTANCE_NAMES,
     MEETING_STATUS_NAMES,
     RESPONSE_NAMES,
     TASK_STATUS_NAMES,
-    IMPORTANCE_NAMES,
 )
 
 PR_INTERNET_MESSAGE_ID_UNICODE = (

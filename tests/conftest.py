@@ -64,4 +64,5 @@ def pytest_sessionfinish(session, exitstatus):
     path.write_text(
         json.dumps(artifact, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+        newline="\n",
     )

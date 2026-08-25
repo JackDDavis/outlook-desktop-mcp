@@ -14,9 +14,9 @@ permission control without running multiple SSE server instances.
 import argparse
 import asyncio
 import json
-import sys
-import struct
 import socket
+import struct
+import sys
 from urllib.parse import urlparse
 
 PORT = 3721

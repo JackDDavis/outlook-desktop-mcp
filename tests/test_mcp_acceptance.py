@@ -14,7 +14,6 @@ from mcp.client.stdio import stdio_client
 
 from tests.fakes import make_entry_id
 
-
 REPO_ROOT = Path(__file__).parents[1]
 
 

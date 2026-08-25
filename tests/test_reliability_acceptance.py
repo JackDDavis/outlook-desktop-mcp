@@ -32,7 +32,6 @@ from tests.test_message_identity import (
 from tests.test_search import install_search_environment
 from tests.test_status import BusyStatusBridge, base_snapshot
 
-
 pytestmark = pytest.mark.acceptance
 
 
