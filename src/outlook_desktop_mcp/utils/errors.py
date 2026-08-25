@@ -137,7 +137,12 @@ def error_details(error: Exception) -> dict[str, Any]:
     if hresult is not None:
         details["hresult"] = f"0x{hresult:08X}"
 
-    if definition in {_UNKNOWN_COM_ERROR, _UNEXPECTED_ERROR}:
+    if definition in {
+        _NOT_FOUND_ERROR,
+        _VALIDATION_ERROR,
+        _UNKNOWN_COM_ERROR,
+        _UNEXPECTED_ERROR,
+    }:
         message = _sanitize_message(error.args[1] if _is_com_error(error) and len(error.args) > 1 else error)
         if message:
             details["message"] = message

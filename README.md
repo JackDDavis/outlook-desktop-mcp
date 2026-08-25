@@ -9,7 +9,7 @@
 > multi-account support, bulk operations, agent permission controls (`--deny`), and efficiency
 > improvements (`include_body`). See upstream for macOS support.
 
-**Turn your running Outlook Desktop into an MCP server with 36 tools — including full multi-account support.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Turn your running Outlook Desktop into an MCP server with 39 tools — including full multi-account support.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 
 Works with Claude Code, Claude Desktop, GitHub Copilot, OpenAI Codex, OpenClaw, and any MCP-compatible agent. Send emails, manage your calendar, create tasks, handle attachments, and more — across every email account configured in Outlook, with a single `account` parameter to target any of them.
 
@@ -93,7 +93,7 @@ outlook-desktop-mcp --http --host 127.0.0.1 --port 3721
 ```
 </details>
 
-**3. Open Outlook Desktop (Classic) and start a session.** That's it — 36 tools are available immediately.
+**3. Open Outlook Desktop (Classic) and start a session.** That's it — 39 tools are available immediately.
 
 ## Alternative Transport: stdio → SSE Proxy (recommended for elevated/WSL edge cases)
 
@@ -192,7 +192,7 @@ Internally, the server runs a dedicated COM thread (Single-Threaded Apartment) t
 - **Python 3.12+**
 - **Outlook must be running** when the MCP server starts
 
-## Available Tools (38)
+## Available Tools (39)
 
 All tool descriptions are optimized for LLM tool discovery — Claude understands exactly how to use each one, what arguments to pass, and what to expect back.
 
@@ -206,10 +206,11 @@ explicitly supplied.
 
 List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `list_tasks`) accept an optional `include_body` parameter. When true, results include a ~300 char body preview, To/CC, and categories inline — eliminating the need for follow-up detail calls during triage.
 
-### Account (1 tool)
+### Health and accounts (2 tools)
 
 | Tool | Description |
 |------|-------------|
+| `outlook_status` | Return immediate Outlook process, COM bridge, queue, active-request, and cached per-account health |
 | `list_accounts` | List all accounts configured in Outlook with display name and email |
 
 ### Email (15 tools)
@@ -256,6 +257,8 @@ List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `lis
 - Local-only calendar writes require `allow_local_only=true`.
 - Naive ISO values are interpreted as the Windows host's local Outlook time.
   Offset/Z values are converted to host-local time before COM assignment.
+- Calendar write responses echo `start_local`, `end_local`, `timezone`, and
+  `interpreted_as` so callers can verify Outlook's wall-clock interpretation.
 - Event end must be later than start. All-day values must be aligned to
   midnight; use the next date as the exclusive end for a one-day event.
 - Calendar validation and COM failures are MCP tool errors (`isError=true`),
@@ -263,6 +266,27 @@ List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `lis
 - `list_events` and `search_events` accept `count` from 1 through 1000. Set
   `include_meta=true` to receive `{events, count, truncated}` instead of a
   bare array.
+
+### Reliability and recovery
+
+Tool failures return a structured error with `code`, `meaning`,
+`likely_cause`, `suggested_action`, and `retryable`. Known Outlook HRESULTs
+also include a sanitized `hresult`; raw COM internals remain in server logs.
+
+`outlook_status()` does not wait behind queued COM work. When Outlook is busy,
+it immediately reports the active request, queue depth, and age of the last
+successful COM call. It submits a five-second live COM probe only when the
+bridge is idle.
+
+For `rpc_unavailable` (`0x800706BA`):
+
+1. Call `outlook_status`.
+2. If `com_responsive` is false, reconnect the MCP server.
+3. If the failure recurs, use `restart.ps1` or restart Outlook Desktop.
+
+Parallel tool calls are safe: the server serializes Outlook COM access. A
+response may include native `_meta.queue_wait_ms` and `_meta.execution_ms`;
+queue waits over ten seconds include an Outlook-busy note.
 
 Example:
 
@@ -370,13 +394,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching strategy and developmen
 ```
 outlook-desktop-mcp/
   src/outlook_desktop_mcp/
-    server.py              # MCP server + all 36 tool definitions
-    com_bridge.py          # Async-to-COM threading bridge (60s timeout)
+    server.py              # MCP server + tool definitions
+    com_bridge.py          # Observable serialized COM bridge
     tools/
       _folder_constants.py # Outlook enums and constants
     utils/
       formatting.py        # Email, event, and task data extraction
-      errors.py            # COM error formatting
+      errors.py            # Structured, sanitized diagnostics
+      responses.py         # MCP-native response and metadata helpers
   tests/
     phase1_com_test.py     # Email COM validation
     phase3_mcp_test.py     # Email MCP test

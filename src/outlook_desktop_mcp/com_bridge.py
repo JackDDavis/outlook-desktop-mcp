@@ -59,6 +59,7 @@ class BridgeRequest:
     error: Exception | None = None
     cancelled: bool = False
     caller_timed_out: bool = False
+    pending: bool = False
     state_lock: threading.Lock = field(default_factory=threading.Lock)
     completion_event: threading.Event = field(default_factory=threading.Event)
 
@@ -107,6 +108,7 @@ class OutlookBridge:
         self._init_error: Exception | None = None
         self._state_lock = threading.Lock()
         self._active_request: BridgeRequest | None = None
+        self._pending_count = 0
         self._last_success_at: str | None = None
         self._last_success_monotonic: float | None = None
         self._last_failure_at: str | None = None
@@ -180,15 +182,18 @@ class OutlookBridge:
 
                 with request.state_lock:
                     if request.cancelled:
+                        self._release_pending(request)
                         request.completed_monotonic = time.monotonic()
                         request.completed_at = _utc_now()
                         request.completion_event.set()
                         continue
                     request.started_monotonic = time.monotonic()
                     request.started_at = _utc_now()
-
-                with self._state_lock:
-                    self._active_request = request
+                    with self._state_lock:
+                        if request.pending:
+                            self._pending_count -= 1
+                            request.pending = False
+                        self._active_request = request
 
                 try:
                     request.result = request.function(
@@ -242,7 +247,7 @@ class OutlookBridge:
             return {
                 "process_instance_id": self._process_instance_id,
                 "thread_alive": bool(self._thread and self._thread.is_alive()),
-                "queue_depth": self._request_queue.qsize(),
+                "queue_depth": self._pending_count,
                 "active_request": (
                     {
                         "name": active.name,
@@ -271,7 +276,62 @@ class OutlookBridge:
 
     def is_idle(self) -> bool:
         with self._state_lock:
-            return self._active_request is None and self._request_queue.empty()
+            return self._active_request is None and self._pending_count == 0
+
+    def _enqueue(self, request: BridgeRequest, *, only_if_idle: bool = False) -> bool:
+        with self._state_lock:
+            if only_if_idle and (
+                not self._thread
+                or not self._thread.is_alive()
+                or self._active_request is not None
+                or self._pending_count > 0
+            ):
+                return False
+            self._pending_count += 1
+            request.pending = True
+            self._request_queue.put(request)
+            return True
+
+    def _release_pending(self, request: BridgeRequest):
+        with self._state_lock:
+            if request.pending:
+                self._pending_count -= 1
+                request.pending = False
+
+    async def _wait_for_request(self, request: BridgeRequest) -> BridgeCallResult:
+        signaled = await asyncio.to_thread(
+            request.completion_event.wait,
+            request.timeout_seconds,
+        )
+        if not signaled:
+            with request.state_lock:
+                if request.started_monotonic is None:
+                    request.cancelled = True
+                    self._release_pending(request)
+                    phase = "queue"
+                else:
+                    request.caller_timed_out = True
+                    phase = "execution"
+            raise BridgeTimeoutError(
+                request.name,
+                request.timeout_seconds,
+                phase,
+            )
+
+        if request.cancelled:
+            raise BridgeTimeoutError(
+                request.name,
+                request.timeout_seconds,
+                "queue",
+            )
+        if request.error is not None:
+            raise request.error
+        return BridgeCallResult(
+            value=request.result,
+            queue_wait_ms=request.queue_wait_ms,
+            execution_ms=request.execution_ms or 0,
+            request_name=request.name,
+        )
 
     async def call_with_metrics(
         self,
@@ -297,29 +357,30 @@ class OutlookBridge:
             kwargs=kwargs,
             timeout_seconds=timeout,
         )
-        self._request_queue.put(request)
+        self._enqueue(request)
+        return await self._wait_for_request(request)
 
-        signaled = await asyncio.to_thread(request.completion_event.wait, timeout)
-        if not signaled:
-            with request.state_lock:
-                if request.started_monotonic is None:
-                    request.cancelled = True
-                    phase = "queue"
-                else:
-                    request.caller_timed_out = True
-                    phase = "execution"
-            raise BridgeTimeoutError(request.name, timeout, phase)
-
-        if request.cancelled:
-            raise BridgeTimeoutError(request.name, timeout, "queue")
-        if request.error is not None:
-            raise request.error
-        return BridgeCallResult(
-            value=request.result,
-            queue_wait_ms=request.queue_wait_ms,
-            execution_ms=request.execution_ms or 0,
-            request_name=request.name,
+    async def call_if_idle_with_metrics(
+        self,
+        function,
+        *args,
+        timeout_seconds: float,
+        request_name: str,
+        **kwargs,
+    ) -> BridgeCallResult | None:
+        """Run a probe only if no COM request is active or queued."""
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        request = BridgeRequest(
+            name=request_name,
+            function=function,
+            args=args,
+            kwargs=kwargs,
+            timeout_seconds=timeout_seconds,
         )
+        if not self._enqueue(request, only_if_idle=True):
+            return None
+        return await self._wait_for_request(request)
 
     async def call(
         self,

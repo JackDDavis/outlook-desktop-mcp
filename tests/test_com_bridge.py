@@ -160,6 +160,43 @@ def test_call_adds_native_queue_metadata(monkeypatch):
     assert result.meta["execution_ms"] >= 0
 
 
+def test_idle_probe_is_rejected_without_queueing_behind_active_work(monkeypatch):
+    bridge = start_fake_bridge(monkeypatch)
+    active = threading.Event()
+    release = threading.Event()
+    probe_calls = []
+
+    def blocked(_outlook, _namespace):
+        active.set()
+        release.wait(1)
+
+    def probe(_outlook, _namespace):
+        probe_calls.append("ran")
+
+    async def run_probe():
+        task = asyncio.create_task(
+            bridge.call(blocked, timeout_seconds=1, request_name="blocked")
+        )
+        await asyncio.to_thread(active.wait, 1)
+        result = await bridge.call_if_idle_with_metrics(
+            probe,
+            timeout_seconds=0.1,
+            request_name="probe",
+        )
+        release.set()
+        await task
+        return result
+
+    try:
+        result = asyncio.run(run_probe())
+    finally:
+        release.set()
+        bridge.stop()
+
+    assert result is None
+    assert probe_calls == []
+
+
 def test_accounts_snapshot_is_copied(monkeypatch):
     bridge = start_fake_bridge(monkeypatch)
     accounts = [{"name": "one", "unread": 1}]
@@ -180,3 +217,18 @@ def test_invalid_timeout_environment(monkeypatch):
 
     with pytest.raises(ValueError, match="positive"):
         OutlookBridge()
+
+
+def test_timeout_on_stopped_bridge_does_not_leave_pending_request():
+    bridge = OutlookBridge()
+
+    async def run_call():
+        with pytest.raises(BridgeTimeoutError, match="during queue"):
+            await bridge.call(
+                lambda _outlook, _namespace: None,
+                timeout_seconds=0.01,
+            )
+
+    asyncio.run(run_call())
+
+    assert bridge.health_snapshot()["queue_depth"] == 0

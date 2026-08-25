@@ -7,48 +7,56 @@ Just run this on Windows with Outlook open and you have a full email MCP server.
 
 Entry point: python -m outlook_desktop_mcp.server
 """
-import sys
 import json
 import logging
+import os
 import re
-
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-
-from outlook_desktop_mcp.com_bridge import OutlookBridge
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta
 
-import os
+from mcp.server.fastmcp import FastMCP
 
+from outlook_desktop_mcp.com_bridge import OutlookBridge
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
-    OL_MAIL_ITEM,
+    IMPORTANCE_NAMES,
     OL_APPOINTMENT_ITEM,
     OL_FOLDER_CALENDAR,
     OL_FOLDER_DRAFTS,
     OL_FOLDER_INBOX,
     OL_FOLDER_TASKS,
+    OL_MAIL_ITEM,
     OL_MEETING,
     OL_MEETING_CANCELED,
-    OL_RESPONSE_TENTATIVE,
+    OL_OPTIONAL,
+    OL_REQUIRED,
     OL_RESPONSE_ACCEPTED,
     OL_RESPONSE_DECLINED,
-    OL_REQUIRED,
-    OL_OPTIONAL,
-    OL_TASK_ITEM,
+    OL_RESPONSE_TENTATIVE,
     OL_TASK_COMPLETE,
+    OL_TASK_ITEM,
     TASK_STATUS_NAMES,
-    IMPORTANCE_NAMES,
+)
+from outlook_desktop_mcp.utils.errors import (
+    error_details,
+    error_envelope,
+    format_com_error,
 )
 from outlook_desktop_mcp.utils.formatting import (
-    format_email_summary,
     format_email_full,
-    format_event_summary,
+    format_email_summary,
     format_event_full,
-    format_task_summary,
+    format_event_summary,
     format_task_full,
+    format_task_summary,
 )
-from outlook_desktop_mcp.utils.errors import format_com_error
+from outlook_desktop_mcp.utils.responses import tool_result
+
+SERVER_VERSION = "0.5.0"
+HEALTH_PROBE_TIMEOUT_SECONDS = 5.0
+HEALTH_FRESH_SECONDS = 60.0
 
 # --- Logging (all to stderr, stdout is reserved for MCP JSON-RPC) ---
 
@@ -92,9 +100,74 @@ def _error_text(e: Exception) -> str:
     return formatted
 
 
+def _tool_error(error: Exception):
+    """Return an MCP-native structured error result."""
+    return tool_result(error_envelope(error), is_error=True)
+
+
+def _outlook_process_running() -> bool:
+    """Check OUTLOOK.EXE without touching the serialized COM bridge."""
+    if os.name != "nt":
+        return False
+    try:
+        completed = subprocess.run(
+            [
+                "tasklist",
+                "/FI",
+                "IMAGENAME eq OUTLOOK.EXE",
+                "/FO",
+                "CSV",
+                "/NH",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=0.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "OUTLOOK.EXE" in completed.stdout.upper()
+
+
+def _collect_status_probe(outlook, namespace) -> dict:
+    """Collect live Outlook status on the COM thread."""
+    application_name = getattr(outlook, "Name", "Microsoft Outlook")
+    profile = getattr(namespace, "CurrentProfileName", "") or ""
+    accounts = []
+    for index in range(namespace.Stores.Count):
+        store = namespace.Stores.Item(index + 1)
+        row = {
+            "name": store.DisplayName,
+            "store_id": store.StoreID,
+            "unread": None,
+            "total": None,
+        }
+        try:
+            inbox = store.GetDefaultFolder(OL_FOLDER_INBOX)
+            row["unread"] = inbox.UnReadItemCount
+            row["total"] = inbox.Items.Count
+        except Exception as error:  # noqa: BLE001 - report per-store degradation
+            row["error"] = error_details(error)
+        accounts.append(row)
+    return {
+        "application_name": application_name,
+        "profile": profile,
+        "accounts": accounts,
+    }
+
+
 # --- MCP Server ---
 
-mcp = FastMCP(
+
+class OutlookFastMCP(FastMCP):
+    """Keep legacy text outputs while tools opt into explicit structured results."""
+
+    def tool(self, *args, **kwargs):
+        kwargs.setdefault("structured_output", False)
+        return super().tool(*args, **kwargs)
+
+
+mcp = OutlookFastMCP(
     "outlook-desktop-mcp",
     instructions=(
         "This MCP server gives you full access to Microsoft Outlook Desktop on "
@@ -120,6 +193,11 @@ mcp = FastMCP(
 )
 
 bridge = OutlookBridge()
+
+
+def _operations_in_flight() -> int:
+    """Return active durable operation count once the operation manager is loaded."""
+    return 0
 
 
 # --- Helper: resolve store by account name ---
@@ -394,6 +472,105 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
 
 
 # =====================================================================
+# TOOL: outlook_status
+# =====================================================================
+
+@mcp.tool()
+async def outlook_status():
+    """Return immediate Outlook and bridge health diagnostics.
+
+    This tool never queues behind active Outlook work. When the bridge is idle,
+    it performs one bounded COM probe; otherwise it reports process, queue,
+    active-request, and last-success state from the in-process health snapshot.
+    """
+    started = time.monotonic()
+    outlook_running = _outlook_process_running()
+    initial_snapshot = bridge.health_snapshot()
+    probe_state = (
+        "skipped_bridge_stopped"
+        if not initial_snapshot["thread_alive"]
+        else "skipped_busy"
+    )
+    probe_error = None
+    com_ping_ms = None
+
+    if initial_snapshot["thread_alive"]:
+        try:
+            probe = await bridge.call_if_idle_with_metrics(
+                _collect_status_probe,
+                timeout_seconds=HEALTH_PROBE_TIMEOUT_SECONDS,
+                request_name="outlook_status_probe",
+            )
+        except Exception as error:  # noqa: BLE001 - status reports degraded state
+            probe = None
+            probe_state = "failed"
+            probe_error = error_details(error)
+    else:
+        probe = None
+
+    if probe is not None:
+        probe_state = "completed"
+        com_ping_ms = probe.execution_ms
+        outlook_running = True
+        bridge.update_accounts_snapshot(probe.value["accounts"])
+        profile = probe.value["profile"]
+        application_name = probe.value["application_name"]
+    else:
+        profile = ""
+        application_name = "Microsoft Outlook"
+
+    snapshot = bridge.health_snapshot()
+    fresh_success = (
+        snapshot["last_success_age_ms"] is not None
+        and snapshot["last_success_age_ms"] <= HEALTH_FRESH_SECONDS * 1000
+    )
+    busy = snapshot["active_request"] is not None or snapshot["queue_depth"] > 0
+    com_responsive = bool(
+        snapshot["thread_alive"]
+        and (probe_state == "completed" or fresh_success)
+    )
+
+    if probe_state == "completed":
+        com_state = "responsive"
+    elif not snapshot["thread_alive"]:
+        com_state = "bridge_stopped"
+    elif busy:
+        com_state = "busy"
+    else:
+        com_state = "unresponsive"
+
+    status_elapsed_ms = round((time.monotonic() - started) * 1000)
+    payload = {
+        "outlook_running": outlook_running,
+        "com_responsive": com_responsive,
+        "com_state": com_state,
+        "com_probe": probe_state,
+        "com_ping_ms": com_ping_ms,
+        "application_name": application_name,
+        "profile": profile,
+        "version": SERVER_VERSION,
+        "accounts": snapshot["accounts"],
+        "accounts_snapshot_at": snapshot["accounts_snapshot_at"],
+        "accounts_snapshot_age_ms": snapshot["accounts_snapshot_age_ms"],
+        "accounts_stale": probe_state != "completed",
+        "queue_depth": snapshot["queue_depth"],
+        "active_request": snapshot["active_request"],
+        "last_success_at": snapshot["last_success_at"],
+        "last_success_age_ms": snapshot["last_success_age_ms"],
+        "last_failure_at": snapshot["last_failure_at"],
+        "last_failure": snapshot["last_failure"],
+        "operations_in_flight": _operations_in_flight(),
+        "status_elapsed_ms": status_elapsed_ms,
+    }
+    if probe_error:
+        payload["probe_error"] = probe_error
+    return tool_result(
+        payload,
+        meta={"queue_wait_ms": 0, "execution_ms": status_elapsed_ms},
+    )
+
+
+# =====================================================================
 # TOOL: list_accounts
 # =====================================================================
 
@@ -435,7 +612,7 @@ async def list_accounts() -> str:
     try:
         return await bridge.call(_list)
     except Exception as e:
-        return f"Error listing accounts: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -496,7 +673,7 @@ async def send_email(
     try:
         return await bridge.call(_send, to, subject, body, cc, bcc, html_body, account)
     except Exception as e:
-        return f"Error sending email: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -575,7 +752,7 @@ async def create_draft(
     try:
         return await bridge.call(_draft, subject, body, to, cc, bcc, html_body, account)
     except Exception as e:
-        return f"Error creating draft: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -626,7 +803,7 @@ async def list_emails(
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
         if not target:
-            return json.dumps({"error": f"Folder '{folder}' not found"})
+            raise ValueError(f"Folder '{folder}' not found")
 
         items = target.Items
         items.Sort("[ReceivedTime]", True)
@@ -660,7 +837,7 @@ async def list_emails(
     try:
         return await bridge.call(_list, folder, count, unread_only, include_body, start_date, end_date, account)
     except Exception as e:
-        return f"Error listing emails: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -701,12 +878,12 @@ async def read_email(
             return json.dumps(format_email_full(item), indent=2, default=str)
 
         if not subject_search:
-            return json.dumps({"error": "Provide either entry_id or subject_search"})
+            raise ValueError("Provide either entry_id or subject_search")
 
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
         if not target:
-            return json.dumps({"error": f"Folder '{folder}' not found"})
+            raise ValueError(f"Folder '{folder}' not found")
 
         safe_query = _safe_dasl(subject_search)
         filter_str = (
@@ -715,14 +892,14 @@ async def read_email(
         items = target.Items.Restrict(filter_str)
         items.Sort("[ReceivedTime]", True)
         if items.Count == 0:
-            return json.dumps({"error": f"No email found matching '{subject_search}'"})
+            raise LookupError(f"No email found matching '{subject_search}'")
 
         return json.dumps(format_email_full(items.Item(1)), indent=2, default=str)
 
     try:
         return await bridge.call(_read, entry_id, subject_search, folder, account)
     except Exception as e:
-        return f"Error reading email: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -752,7 +929,7 @@ async def mark_as_read(entry_id: str, account: str = "") -> str:
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
         item.UnRead = False
         item.Save()
@@ -761,7 +938,7 @@ async def mark_as_read(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_mark, entry_id, account)
     except Exception as e:
-        return f"Error marking email as read: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -791,7 +968,7 @@ async def mark_as_unread(entry_id: str, account: str = "") -> str:
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
         item.UnRead = True
         item.Save()
@@ -800,7 +977,7 @@ async def mark_as_unread(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_mark, entry_id, account)
     except Exception as e:
-        return f"Error marking email as unread: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -833,13 +1010,16 @@ async def move_email(
     def _move(outlook, namespace, entry_id, target_folder, account):
         item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
 
         store = _require_store(namespace, account)
         dest = _resolve_folder(namespace, target_folder, store)
         if not dest:
-            return f"Error: Target folder '{target_folder}' not found. Use list_folders to see available folders."
+            raise ValueError(
+                f"Target folder '{target_folder}' not found. "
+                "Use list_folders to see available folders."
+            )
 
         item.Move(dest)
         return f"Moved '{subject}' to {target_folder}"
@@ -847,7 +1027,7 @@ async def move_email(
     try:
         return await bridge.call(_move, entry_id, target_folder, account)
     except Exception as e:
-        return f"Error moving email: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -885,7 +1065,7 @@ async def reply_email(
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
         reply_item = item.ReplyAll() if reply_all else item.Reply()
         reply_item.Body = body + "\n\n" + reply_item.Body
@@ -895,7 +1075,7 @@ async def reply_email(
     try:
         return await bridge.call(_reply, entry_id, body, reply_all, account)
     except Exception as e:
-        return f"Error replying to email: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -936,7 +1116,7 @@ async def forward_email(
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
         fwd = item.Forward()
         fwd.To = to
@@ -952,7 +1132,7 @@ async def forward_email(
     try:
         return await bridge.call(_forward, entry_id, to, body, cc, bcc, account)
     except Exception as e:
-        return f"Error forwarding email: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -993,7 +1173,7 @@ async def list_folders(folder: str = "", max_depth: int = 3, account: str = "") 
         if folder:
             start = _resolve_folder(namespace, folder, store)
             if not start:
-                return json.dumps({"error": f"Folder '{folder}' not found"})
+                raise ValueError(f"Folder '{folder}' not found")
             base_path = folder
         else:
             start = store.GetRootFolder()
@@ -1031,7 +1211,7 @@ async def list_folders(folder: str = "", max_depth: int = 3, account: str = "") 
     try:
         return await bridge.call(_list, folder, max_depth, account)
     except Exception as e:
-        return f"Error listing folders: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -1077,7 +1257,7 @@ async def search_emails(
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
         if not target:
-            return json.dumps({"error": f"Folder '{folder}' not found"})
+            raise ValueError(f"Folder '{folder}' not found")
 
         safe_query = _safe_dasl(query)
         dasl_parts = [
@@ -1115,7 +1295,7 @@ async def search_emails(
     try:
         return await bridge.call(_search, query, folder, count, include_body, start_date, end_date, account)
     except Exception as e:
-        return f"Error searching emails: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -1175,8 +1355,8 @@ async def bulk_read_emails(
                 count=count,
                 account=account,
             )
-        except Exception as e:
-            return json.dumps({"error": _error_text(e)})
+        except Exception:
+            raise
 
         results = list(failures)
         for item in items:
@@ -1203,7 +1383,7 @@ async def bulk_read_emails(
             folder, unread_only, start_date, end_date, count, account,
         )
     except Exception as e:
-        return f"Error bulk reading emails: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -1231,9 +1411,9 @@ async def bulk_mark_as_read(
         if not entry_ids.strip() and not _has_bulk_filter(
             sender, subject_contains, body_contains, unread_only, start_date, end_date
         ):
-            return json.dumps({
-                "error": "Provide entry_ids or at least one filter for bulk_mark_as_read."
-            })
+            raise ValueError(
+                "Provide entry_ids or at least one filter for bulk_mark_as_read."
+            )
 
         try:
             items, failures = _select_email_items(
@@ -1249,8 +1429,8 @@ async def bulk_mark_as_read(
                 count=count,
                 account=account,
             )
-        except Exception as e:
-            return json.dumps({"error": _error_text(e)})
+        except Exception:
+            raise
 
         results = list(failures)
         for item in items:
@@ -1288,7 +1468,7 @@ async def bulk_mark_as_read(
             folder, unread_only, start_date, end_date, count, account,
         )
     except Exception as e:
-        return f"Error bulk marking emails as read: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -1316,9 +1496,9 @@ async def bulk_mark_as_unread(
         if not entry_ids.strip() and not _has_bulk_filter(
             sender, subject_contains, body_contains, unread_only, start_date, end_date
         ):
-            return json.dumps({
-                "error": "Provide entry_ids or at least one filter for bulk_mark_as_unread."
-            })
+            raise ValueError(
+                "Provide entry_ids or at least one filter for bulk_mark_as_unread."
+            )
 
         try:
             items, failures = _select_email_items(
@@ -1334,8 +1514,8 @@ async def bulk_mark_as_unread(
                 count=count,
                 account=account,
             )
-        except Exception as e:
-            return json.dumps({"error": _error_text(e)})
+        except Exception:
+            raise
 
         results = list(failures)
         for item in items:
@@ -1373,7 +1553,7 @@ async def bulk_mark_as_unread(
             folder, unread_only, start_date, end_date, count, account,
         )
     except Exception as e:
-        return f"Error bulk marking emails as unread: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -1402,16 +1582,17 @@ async def bulk_move_emails(
         if not entry_ids.strip() and not _has_bulk_filter(
             sender, subject_contains, body_contains, unread_only, start_date, end_date
         ):
-            return json.dumps({
-                "error": "Provide entry_ids or at least one filter for bulk_move_emails."
-            })
+            raise ValueError(
+                "Provide entry_ids or at least one filter for bulk_move_emails."
+            )
 
         store = _require_store(namespace, account)
         dest = _resolve_folder(namespace, target_folder, store)
         if not dest:
-            return json.dumps({
-                "error": f"Target folder '{target_folder}' not found. Use list_folders to see available folders."
-            })
+            raise ValueError(
+                f"Target folder '{target_folder}' not found. "
+                "Use list_folders to see available folders."
+            )
 
         try:
             items, failures = _select_email_items(
@@ -1427,8 +1608,8 @@ async def bulk_move_emails(
                 count=count,
                 account=account,
             )
-        except Exception as e:
-            return json.dumps({"error": _error_text(e)})
+        except Exception:
+            raise
 
         results = list(failures)
         for item in items:
@@ -1468,7 +1649,7 @@ async def bulk_move_emails(
             body_contains, folder, unread_only, start_date, end_date, count, account,
         )
     except Exception as e:
-        return f"Error bulk moving emails: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -1501,6 +1682,46 @@ def _parse_date(date_str: str | datetime) -> datetime:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed
+
+
+def _has_explicit_timezone(value: str | datetime) -> bool:
+    if isinstance(value, datetime):
+        return value.tzinfo is not None
+    text = value.strip().replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _local_timezone_name(value: datetime) -> str:
+    is_dst = time.localtime(value.timestamp()).tm_isdst > 0
+    index = 1 if is_dst and len(time.tzname) > 1 else 0
+    return time.tzname[index] or "local"
+
+
+def _calendar_time_echo(
+    start_value: str | datetime,
+    end_value: str | datetime,
+    *,
+    all_day: bool = False,
+    input_values: tuple[str | datetime, ...] = (),
+) -> dict:
+    start_local = _parse_date(start_value)
+    end_local = _parse_date(end_value)
+    supplied = tuple(value for value in input_values if value not in ("", None))
+    if all_day:
+        interpreted_as = "all-day"
+    elif any(_has_explicit_timezone(value) for value in supplied):
+        interpreted_as = "explicit offset"
+    else:
+        interpreted_as = "local"
+    return {
+        "start_local": start_local.strftime("%Y-%m-%d %H:%M"),
+        "end_local": end_local.strftime("%Y-%m-%d %H:%M"),
+        "timezone": _local_timezone_name(start_local),
+        "interpreted_as": interpreted_as,
+    }
 
 
 def _validate_calendar_interval(start: str, end: str,
@@ -1659,7 +1880,7 @@ async def list_calendars(account: str = "") -> str:
     try:
         return await bridge.call(_list, account)
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -1747,7 +1968,7 @@ async def list_events(
             calendar, include_meta,
         )
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -1783,7 +2004,7 @@ async def get_event(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_get, entry_id, account)
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -1859,6 +2080,12 @@ async def create_event(
             "start": str(appt.Start),
             "end": str(appt.End),
             "entry_id": appt.EntryID,
+            **_calendar_time_echo(
+                appt.Start,
+                appt.End,
+                all_day=all_day,
+                input_values=(start, end),
+            ),
             **_calendar_context(store, selected, is_default, local_only),
         }, indent=2, default=str)
 
@@ -1868,7 +2095,7 @@ async def create_event(
             reminder_minutes, account, calendar, allow_local_only,
         )
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -1961,6 +2188,13 @@ async def create_meeting(
             "status": "sent",
             "subject": subject,
             "entry_id": getattr(appt, "EntryID", ""),
+            "start": str(appt.Start),
+            "end": str(appt.End),
+            **_calendar_time_echo(
+                appt.Start,
+                appt.End,
+                input_values=(start, end),
+            ),
             **_calendar_context(store, selected, is_default, local_only),
         }, indent=2, default=str)
 
@@ -1970,7 +2204,7 @@ async def create_meeting(
             optional_attendees, account, calendar, allow_local_only,
         )
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2038,6 +2272,12 @@ async def update_event(
             "end": str(item.End),
             "location": item.Location or "",
             "entry_id": item.EntryID,
+            **_calendar_time_echo(
+                item.Start,
+                item.End,
+                all_day=bool(getattr(item, "AllDayEvent", False)),
+                input_values=(start, end),
+            ),
         }, indent=2, default=str)
 
     try:
@@ -2045,7 +2285,7 @@ async def update_event(
             _update, entry_id, subject, start, end, location, body, account,
         )
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2093,7 +2333,7 @@ async def delete_event(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_delete, entry_id, account)
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2179,7 +2419,7 @@ async def move_event(
             target_calendar, allow_local_only,
         )
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2236,7 +2476,7 @@ async def respond_to_meeting(
     try:
         return await bridge.call(_respond, entry_id, response, account)
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2322,7 +2562,7 @@ async def search_events(
             account, calendar, include_meta,
         )
     except Exception as e:
-        raise ToolError(_error_text(e)) from e
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2376,7 +2616,7 @@ async def list_tasks(
     try:
         return await bridge.call(_list, include_completed, count, include_body, account)
     except Exception as e:
-        return f"Error listing tasks: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -2402,7 +2642,7 @@ async def get_task(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_get, entry_id, account)
     except Exception as e:
-        return f"Error reading task: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -2464,7 +2704,7 @@ async def create_task(
             account,
         )
     except Exception as e:
-        return f"Error creating task: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -2488,7 +2728,7 @@ async def complete_task(entry_id: str, account: str = "") -> str:
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_TASK, "task item"):
-            return err
+            raise ValueError(err)
         item.Status = OL_TASK_COMPLETE
         item.PercentComplete = 100
         item.Save()
@@ -2497,7 +2737,7 @@ async def complete_task(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_complete, entry_id, account)
     except Exception as e:
-        return f"Error completing task: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -2519,7 +2759,7 @@ async def delete_task(entry_id: str, account: str = "") -> str:
         else:
             item = namespace.GetItemFromID(entry_id)
         if err := _check_item_class(item, _OL_CLASS_TASK, "task item"):
-            return err
+            raise ValueError(err)
         subject = item.Subject
         item.Delete()
         return f"Task deleted: '{subject}'"
@@ -2527,7 +2767,7 @@ async def delete_task(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_delete, entry_id, account)
     except Exception as e:
-        return f"Error deleting task: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2565,7 +2805,7 @@ async def list_attachments(entry_id: str, account: str = "") -> str:
     try:
         return await bridge.call(_list, entry_id, account)
     except Exception as e:
-        return f"Error listing attachments: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -2598,7 +2838,10 @@ async def save_attachment(
         else:
             item = namespace.GetItemFromID(entry_id)
         if attachment_index < 1 or item.Attachments.Count < attachment_index:
-            return f"Error: Only {item.Attachments.Count} attachment(s), requested index {attachment_index}"
+            raise ValueError(
+                f"Only {item.Attachments.Count} attachment(s), "
+                f"requested index {attachment_index}"
+            )
 
         att = item.Attachments.Item(attachment_index)
         if not save_directory:
@@ -2632,7 +2875,7 @@ async def save_attachment(
     try:
         return await bridge.call(_save, entry_id, attachment_index, save_directory, account)
     except Exception as e:
-        return f"Error saving attachment: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2664,7 +2907,7 @@ async def list_categories(account: str = "") -> str:
     try:
         return await bridge.call(_list, account)
     except Exception as e:
-        return f"Error listing categories: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -2705,7 +2948,7 @@ async def set_category(
     try:
         return await bridge.call(_set, entry_id, categories, account)
     except Exception as e:
-        return f"Error setting categories: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2741,7 +2984,7 @@ async def list_rules(account: str = "") -> str:
     try:
         return await bridge.call(_list, account)
     except Exception as e:
-        return f"Error listing rules: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 @mcp.tool()
@@ -2778,12 +3021,14 @@ async def toggle_rule(
                 rules.Save()
                 status = "enabled" if enabled else "disabled"
                 return f"Rule '{rule_name}' {status}"
-        return f"Error: Rule '{rule_name}' not found. Use list_rules to see available rules."
+        raise LookupError(
+            f"Rule '{rule_name}' not found. Use list_rules to see available rules."
+        )
 
     try:
         return await bridge.call(_toggle, rule_name, enabled, account)
     except Exception as e:
-        return f"Error toggling rule: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================
@@ -2822,7 +3067,7 @@ async def get_out_of_office(account: str = "") -> str:
     try:
         return await bridge.call(_get, account)
     except Exception as e:
-        return f"Error checking OOF status: {format_com_error(e)}"
+        return _tool_error(e)
 
 
 # =====================================================================

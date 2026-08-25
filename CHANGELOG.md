@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `outlook_status` for queue-independent Outlook process, COM bridge, account,
+  and active-request diagnostics
+- Structured error envelopes with stable codes, meanings, likely causes,
+  suggested actions, retryability, and sanitized HRESULTs
+- Queue wait and execution timing support in the serialized COM bridge
+- Local time, timezone, and input interpretation echoes on calendar writes
+
+### Changed
+- COM requests now have configurable 30-second single-call and 90-second bulk
+  time budgets
+- Queued requests that expire before execution are canceled instead of running
+  later with an unknown side effect
+- Calendar and non-calendar tool failures use the same MCP-native error shape
+- Package version bumped to 0.5.0
+
 ## [0.4.0] — 2026-08-11
 
 ### Added

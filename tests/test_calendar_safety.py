@@ -3,7 +3,6 @@ import json
 from datetime import datetime
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
 
 from outlook_desktop_mcp import server
 
@@ -185,13 +184,14 @@ def test_list_calendars_identifies_local_only(monkeypatch):
 
 def test_create_event_blocks_local_only_before_side_effect(monkeypatch):
     outlook, _, _, _, local = fixture_environment(monkeypatch)
-    with pytest.raises(ToolError, match="local-only"):
-        asyncio.run(server.create_event(
-            "Blocked",
-            "2026-01-01 09:00",
-            "2026-01-01 10:00",
-            account="local@example.com",
-        ))
+    result = asyncio.run(server.create_event(
+        "Blocked",
+        "2026-01-01 09:00",
+        "2026-01-01 10:00",
+        account="local@example.com",
+    ))
+    assert result.isError is True
+    assert "local-only" in result.structuredContent["error"]["message"]
     assert local.Items.created == []
     assert outlook.create_item_calls == 0
 
@@ -239,12 +239,13 @@ def test_create_event_allows_explicit_local_only_opt_in(monkeypatch):
 
 def test_invalid_interval_creates_nothing(monkeypatch):
     outlook, _, primary, _, _ = fixture_environment(monkeypatch)
-    with pytest.raises(ToolError, match="later"):
-        asyncio.run(server.create_event(
-            "Invalid",
-            "2026-01-01 10:00",
-            "2026-01-01 09:00",
-        ))
+    result = asyncio.run(server.create_event(
+        "Invalid",
+        "2026-01-01 10:00",
+        "2026-01-01 09:00",
+    ))
+    assert result.isError is True
+    assert "later" in result.structuredContent["error"]["message"]
     assert primary.Items.created == []
     assert outlook.create_item_calls == 0
 
@@ -261,12 +262,13 @@ def test_move_event_blocks_local_target_and_preserves_item(monkeypatch):
     _, namespace, primary, _, local = fixture_environment(monkeypatch)
     item = FakeItem(parent=primary)
     namespace.items[item.EntryID] = item
-    with pytest.raises(ToolError, match="local-only"):
-        asyncio.run(server.move_event(
-            item.EntryID,
-            "local@example.com",
-            source_account="primary@example.com",
-        ))
+    blocked = asyncio.run(server.move_event(
+        item.EntryID,
+        "local@example.com",
+        source_account="primary@example.com",
+    ))
+    assert blocked.isError is True
+    assert "local-only" in blocked.structuredContent["error"]["message"]
     assert item.Parent is primary
     payload = json.loads(asyncio.run(server.move_event(
         item.EntryID,
@@ -282,3 +284,62 @@ def test_move_event_blocks_local_target_and_preserves_item(monkeypatch):
 def test_calendar_result_limit_is_explicit():
     with pytest.raises(ValueError, match="between 1 and 1000"):
         server._validate_result_count(1001)
+
+
+def test_create_event_echoes_local_time_and_interpretation(monkeypatch):
+    fixture_environment(monkeypatch)
+
+    payload = json.loads(asyncio.run(server.create_event(
+        "Local time",
+        "2026-01-01 08:30",
+        "2026-01-01 09:30",
+    )))
+
+    assert payload["start_local"] == "2026-01-01 08:30"
+    assert payload["end_local"] == "2026-01-01 09:30"
+    assert payload["timezone"]
+    assert payload["interpreted_as"] == "local"
+
+
+def test_create_event_echoes_explicit_offset_interpretation(monkeypatch):
+    fixture_environment(monkeypatch)
+
+    payload = json.loads(asyncio.run(server.create_event(
+        "Offset time",
+        "2026-01-01T12:00:00+05:00",
+        "2026-01-01T13:00:00+05:00",
+    )))
+
+    expected = server._parse_date("2026-01-01T12:00:00+05:00")
+    assert payload["start_local"] == expected.strftime("%Y-%m-%d %H:%M")
+    assert payload["interpreted_as"] == "explicit offset"
+
+
+def test_compact_iso_offset_is_reported_as_explicit(monkeypatch):
+    fixture_environment(monkeypatch)
+
+    payload = json.loads(asyncio.run(server.create_event(
+        "Compact offset",
+        "2026-01-01T12:00:00+0500",
+        "2026-01-01T13:00:00+0500",
+    )))
+
+    assert payload["interpreted_as"] == "explicit offset"
+
+
+def test_fastmcp_preserves_structured_error_result(monkeypatch):
+    fixture_environment(monkeypatch)
+
+    result = asyncio.run(server.mcp._tool_manager.call_tool(
+        "create_event",
+        {
+            "subject": "Invalid",
+            "start": "2026-01-01 10:00",
+            "end": "2026-01-01 09:00",
+        },
+        convert_result=True,
+    ))
+
+    assert result.isError is True
+    assert result.structuredContent["error"]["code"] == "validation_error"
+    assert "later" in result.content[0].text
