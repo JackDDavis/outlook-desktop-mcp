@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
   suggested actions, retryability, and sanitized HRESULTs
 - Queue wait and execution timing support in the serialized COM bridge
 - Local time, timezone, and input interpretation echoes on calendar writes
+- Sender filtering on `search_emails`, with DASL on Exchange/MAPI accounts
+  and bounded client-side fallback on IMAP/POP accounts
 
 ### Changed
 - COM requests now have configurable 30-second single-call and 90-second bulk
@@ -18,6 +20,8 @@ All notable changes to this project will be documented in this file.
 - Queued requests that expire before execution are canceled instead of running
   later with an unknown side effect
 - Calendar and non-calendar tool failures use the same MCP-native error shape
+- Sender-filter responses report `filter_mode` and whether the 1000-item
+  client-side scan window was truncated
 - Package version bumped to 0.5.0
 
 ## [0.4.0] — 2026-08-11

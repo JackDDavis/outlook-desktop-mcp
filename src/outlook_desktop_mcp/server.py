@@ -406,6 +406,72 @@ def _matches_email_filters(item, sender: str, subject_contains: str,
     return True
 
 
+def _account_type_by_store(outlook) -> dict[str, int]:
+    result = {}
+    for index in range(outlook.Session.Accounts.Count):
+        try:
+            account = outlook.Session.Accounts.Item(index + 1)
+            result[account.DeliveryStore.StoreID] = account.AccountType
+        except Exception:
+            continue
+    return result
+
+
+def _requires_client_sender_filter(outlook, store) -> bool:
+    # Outlook OlAccountType: Exchange=0, IMAP=1, POP3=2.
+    return _account_type_by_store(outlook).get(store.StoreID) in {1, 2}
+
+
+def _unsupported_sender_dasl(error: Exception) -> bool:
+    hresult = error_details(error).get("hresult")
+    return hresult in {
+        "0x80040102",  # MAPI_E_NO_SUPPORT
+        "0x8004010F",  # MAPI_E_NOT_FOUND / unavailable property
+        "0x80070057",  # E_INVALIDARG from unsupported Restrict expressions
+    }
+
+
+def _email_in_date_range(item, start_date: str, end_date: str) -> bool:
+    received = _parse_date(item.ReceivedTime)
+    if start_date and received < _parse_date(start_date):
+        return False
+    if end_date and received > _parse_date(end_date):
+        return False
+    return True
+
+
+def _client_search_emails(
+    items,
+    *,
+    query: str,
+    sender: str,
+    start_date: str,
+    end_date: str,
+    count: int,
+    include_body: bool,
+) -> tuple[list[dict], bool]:
+    items.Sort("[ReceivedTime]", True)
+    scan_limit = min(items.Count, 1000)
+    query_lower = query.lower()
+    effective_end = end_date or (
+        datetime.now().isoformat() if start_date else ""
+    )
+    results = []
+    for index in range(scan_limit):
+        item = items.Item(index + 1)
+        haystack = f"{item.Subject or ''}\n{item.Body or ''}".lower()
+        if query_lower not in haystack:
+            continue
+        if not _matches_email_filters(item, sender, "", ""):
+            continue
+        if not _email_in_date_range(item, start_date, effective_end):
+            continue
+        results.append(format_email_summary(item, include_body=include_body))
+        if len(results) >= count:
+            break
+    return results, items.Count > scan_limit
+
+
 def _has_bulk_filter(sender: str, subject_contains: str, body_contains: str,
                      unread_only: bool, start_date: str, end_date: str) -> bool:
     """Return True when a non-folder bulk selector is present."""
@@ -1227,6 +1293,7 @@ async def search_emails(
     start_date: str = "",
     end_date: str = "",
     account: str = "",
+    sender: str = "",
 ) -> str:
     """Search for emails in Outlook using text search.
 
@@ -1248,22 +1315,48 @@ async def search_emails(
             ISO 8601 format. Default: now (if start_date is provided).
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
+        sender: Optional. Case-insensitive substring match against sender email
+            address or display name. Sender-filter responses include filter_mode
+            and truncation diagnostics.
 
     Returns:
         JSON array of matching email summaries, or an error.
     """
-    def _search(outlook, namespace, query, folder, count, include_body, start_date, end_date, account):
+    def _search(outlook, namespace, query, folder, count, include_body,
+                start_date, end_date, account, sender):
         count = min(max(1, count), 200)
         store = _require_store(namespace, account)
         target = _resolve_folder(namespace, folder, store)
         if not target:
             raise ValueError(f"Folder '{folder}' not found")
 
+        if sender and _requires_client_sender_filter(outlook, store):
+            results, truncated = _client_search_emails(
+                target.Items,
+                query=query,
+                sender=sender,
+                start_date=start_date,
+                end_date=end_date,
+                count=count,
+                include_body=include_body,
+            )
+            return json.dumps({
+                "results": results,
+                "filter_mode": "client",
+                "truncated": truncated,
+            }, indent=2, default=str)
+
         safe_query = _safe_dasl(query)
         dasl_parts = [
             f"(\"urn:schemas:httpmail:subject\" LIKE '%{safe_query}%' OR "
             f"\"urn:schemas:httpmail:textdescription\" LIKE '%{safe_query}%')"
         ]
+        if sender:
+            safe_sender = _safe_dasl(sender)
+            dasl_parts.append(
+                f"(\"urn:schemas:httpmail:fromemail\" LIKE '%{safe_sender}%' OR "
+                f"\"urn:schemas:httpmail:fromname\" LIKE '%{safe_sender}%')"
+            )
         if start_date:
             start = _parse_date(start_date)
             dasl_parts.append(
@@ -1280,7 +1373,25 @@ async def search_emails(
             )
 
         filter_str = "@SQL=" + " AND ".join(dasl_parts)
-        items = target.Items.Restrict(filter_str)
+        try:
+            items = target.Items.Restrict(filter_str)
+        except Exception as error:
+            if not sender or not _unsupported_sender_dasl(error):
+                raise
+            results, truncated = _client_search_emails(
+                target.Items,
+                query=query,
+                sender=sender,
+                start_date=start_date,
+                end_date=end_date,
+                count=count,
+                include_body=include_body,
+            )
+            return json.dumps({
+                "results": results,
+                "filter_mode": "client",
+                "truncated": truncated,
+            }, indent=2, default=str)
         items.Sort("[ReceivedTime]", True)
 
         results = []
@@ -1290,10 +1401,22 @@ async def search_emails(
                 results.append(format_email_summary(items.Item(i + 1), include_body=include_body))
             except Exception:
                 continue
-        return json.dumps(results, indent=2, default=str)
+        payload = (
+            {
+                "results": results,
+                "filter_mode": "dasl",
+                "truncated": False,
+            }
+            if sender
+            else results
+        )
+        return json.dumps(payload, indent=2, default=str)
 
     try:
-        return await bridge.call(_search, query, folder, count, include_body, start_date, end_date, account)
+        return await bridge.call(
+            _search, query, folder, count, include_body, start_date, end_date,
+            account, sender,
+        )
     except Exception as e:
         return _tool_error(e)
 

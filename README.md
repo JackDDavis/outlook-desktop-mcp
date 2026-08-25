@@ -221,7 +221,7 @@ List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `lis
 | `create_draft` | Create a draft email in Drafts without sending (for user review) |
 | `list_emails` | List recent emails from any folder, with optional body preview |
 | `read_email` | Read full email content by entry ID or subject search |
-| `search_emails` | Full-text search across email subjects and bodies |
+| `search_emails` | Full-text search across subjects/bodies with optional sender filtering |
 | `reply_email` | Reply or reply-all, preserving the conversation thread |
 | `forward_email` | Forward an email with attachments to new recipients |
 | `mark_as_read` | Mark a specific email as read |
@@ -287,6 +287,11 @@ For `rpc_unavailable` (`0x800706BA`):
 Parallel tool calls are safe: the server serializes Outlook COM access. A
 response may include native `_meta.queue_wait_ms` and `_meta.execution_ms`;
 queue waits over ten seconds include an Outlook-busy note.
+
+When `search_emails` receives `sender`, its response includes
+`filter_mode: "dasl" | "client"` and `truncated`. Exchange/MAPI accounts use
+Outlook DASL; IMAP/POP accounts use a client-side scan capped at 1000 items.
+`truncated: true` means older matches may exist outside that scan window.
 
 Example:
 
