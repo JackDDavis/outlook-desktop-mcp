@@ -15,7 +15,6 @@ import argparse
 import asyncio
 import json
 import sys
-import os
 import struct
 import socket
 from urllib.parse import urlparse
@@ -51,6 +50,70 @@ SSE_CONNECT_URL, HOST_HEADER = get_sse_url()
 SSE_URL = SSE_CONNECT_URL + "/sse"
 
 
+def filter_response(data: str, denied_tools: set[str]) -> str | None:
+    """Remove denied tools from a tools/list response."""
+    if not denied_tools:
+        return data
+    try:
+        msg = json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return data
+
+    if (
+        "result" in msg
+        and isinstance(msg["result"], dict)
+        and "tools" in msg["result"]
+    ):
+        original = msg["result"]["tools"]
+        msg["result"]["tools"] = [
+            tool
+            for tool in original
+            if tool.get("name") not in denied_tools
+        ]
+        return json.dumps(msg)
+    return data
+
+
+def check_request(data: str, denied_tools: set[str]) -> str | None:
+    """Return a local JSON-RPC error when a denied tool is called."""
+    if not denied_tools:
+        return None
+    try:
+        msg = json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if msg.get("method") != "tools/call":
+        return None
+    tool_name = msg.get("params", {}).get("name", "")
+    if tool_name not in denied_tools:
+        return None
+    return json.dumps({
+        "jsonrpc": "2.0",
+        "id": msg.get("id"),
+        "error": {
+            "code": -32601,
+            "message": (
+                f"Tool '{tool_name}' is not available "
+                "(denied by proxy policy)"
+            ),
+        },
+    })
+
+
+def validate_message_endpoint(endpoint: str) -> str:
+    """Resolve and validate the server-provided SSE message endpoint."""
+    if endpoint.startswith("/"):
+        endpoint = SSE_CONNECT_URL + endpoint
+    parsed = urlparse(endpoint)
+    expected = urlparse(SSE_CONNECT_URL)
+    if parsed.netloc != expected.netloc:
+        raise ValueError(
+            f"SSE server returned unexpected endpoint host: {parsed.netloc}"
+        )
+    return endpoint
+
+
 async def proxy(denied_tools: set[str]):
     import httpx
     from httpx_sse import aconnect_sse
@@ -60,66 +123,14 @@ async def proxy(denied_tools: set[str]):
 
     headers = {"Host": HOST_HEADER}
 
-    def _filter_response(data: str) -> str | None:
-        """Filter tools/list responses and reject denied tools/call requests."""
-        if not denied_tools:
-            return data
-        try:
-            msg = json.loads(data)
-        except (json.JSONDecodeError, TypeError):
-            return data
-
-        # Filter tools/list response: remove denied tools from the manifest
-        if "result" in msg and isinstance(msg["result"], dict) and "tools" in msg["result"]:
-            original = msg["result"]["tools"]
-            msg["result"]["tools"] = [
-                t for t in original if t.get("name") not in denied_tools
-            ]
-            return json.dumps(msg)
-
-        return data
-
-    def _check_request(data: str) -> str | None:
-        """Intercept tools/call for denied tools, return error response or None."""
-        if not denied_tools:
-            return None
-        try:
-            msg = json.loads(data)
-        except (json.JSONDecodeError, TypeError):
-            return None
-
-        if msg.get("method") == "tools/call":
-            tool_name = msg.get("params", {}).get("name", "")
-            if tool_name in denied_tools:
-                error_resp = {
-                    "jsonrpc": "2.0",
-                    "id": msg.get("id"),
-                    "error": {
-                        "code": -32601,
-                        "message": f"Tool '{tool_name}' is not available (denied by proxy policy)",
-                    },
-                }
-                return json.dumps(error_resp)
-        return None
-
     async def read_sse(client):
         nonlocal message_endpoint
         async with aconnect_sse(client, "GET", SSE_URL, headers=headers) as event_source:
             async for sse in event_source.aiter_sse():
                 if sse.event == "endpoint":
-                    endpoint = sse.data
-                    if endpoint.startswith("/"):
-                        endpoint = SSE_CONNECT_URL + endpoint
-                    # Validate endpoint points to the expected server
-                    parsed = urlparse(endpoint)
-                    expected = urlparse(SSE_CONNECT_URL)
-                    if parsed.netloc != expected.netloc:
-                        raise ValueError(
-                            f"SSE server returned unexpected endpoint host: {parsed.netloc}"
-                        )
-                    message_endpoint = endpoint
+                    message_endpoint = validate_message_endpoint(sse.data)
                 elif sse.event == "message":
-                    filtered = _filter_response(sse.data)
+                    filtered = filter_response(sse.data, denied_tools)
                     if filtered is not None:
                         await response_queue.put(filtered)
 
@@ -139,7 +150,7 @@ async def proxy(denied_tools: set[str]):
                 continue
 
             # Check if this is a denied tool call — respond locally
-            error = _check_request(line)
+            error = check_request(line, denied_tools)
             if error:
                 await response_queue.put(error)
                 continue

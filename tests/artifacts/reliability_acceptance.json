@@ -1,0 +1,39 @@
+{
+  "criteria": {
+    "criterion_1": {
+      "description": "bounded bulk operation polling",
+      "passed": true
+    },
+    "criterion_2": {
+      "description": "stable message identity and degradation shape",
+      "passed": true
+    },
+    "criterion_3": {
+      "description": "bounded degraded status diagnostics",
+      "passed": true
+    },
+    "criterion_4": {
+      "description": "actionable structured tool errors",
+      "passed": true
+    },
+    "criterion_5": {
+      "description": "serialized parallel calls with queue metrics",
+      "passed": true
+    },
+    "criterion_6": {
+      "description": "calendar local-time echo and timezone",
+      "passed": true
+    },
+    "criterion_7": {
+      "description": "Exchange DASL and capped IMAP sender modes",
+      "passed": true
+    },
+    "criterion_8": {
+      "description": "idempotent move rerun and restart interruption",
+      "passed": true
+    }
+  },
+  "passed": true,
+  "schema_version": 1,
+  "suite": "reliability-v0.5.0-hermetic-acceptance"
+}

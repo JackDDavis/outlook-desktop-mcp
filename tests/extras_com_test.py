@@ -6,7 +6,6 @@ Requires Classic Outlook (Desktop) to be running.
 """
 import sys
 import os
-import time
 from datetime import datetime, timedelta
 
 
@@ -116,7 +115,7 @@ def test_save_attachment(namespace, entry_id):
     # Clean up
     if exists:
         os.remove(save_path)
-        log(f"  Cleaned up test file")
+        log("  Cleaned up test file")
 
 
 # ===== CATEGORIES =====

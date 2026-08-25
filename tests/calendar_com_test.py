@@ -7,7 +7,6 @@ building the MCP layer. Requires Classic Outlook (Desktop) to be running.
 Run: .venv\\Scripts\\python tests\\calendar_com_test.py
 """
 import sys
-import time
 from datetime import datetime, timedelta
 
 
@@ -56,7 +55,7 @@ def test_list_upcoming_events(namespace, days=7):
         log(f"       Location: {item.Location or '(none)'}")
         log(f"       Organizer: {item.Organizer}")
         if count >= 10:
-            log(f"  ... (showing first 10)")
+            log("  ... (showing first 10)")
             break
 
     log(f"  Total events in next {days} days: {count}+")

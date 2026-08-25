@@ -288,7 +288,8 @@ def test_list_search_read_and_bulk_shapes_include_stable_identity(
     absent = FakeMailItem(make_entry_id(2), subject="Quarterly report")
     namespace, _inbox = install(monkeypatch, [stable, absent])
 
-    listed = json.loads(asyncio.run(server.list_emails(count=2)))
+    listed_result = asyncio.run(server.list_emails(count=2))
+    listed = json.loads(listed_result.content[0].text)
     searched = json.loads(asyncio.run(server.search_emails("Quarterly", count=2)))
     read = json.loads(asyncio.run(server.read_email(entry_id=stable.EntryID)))
 

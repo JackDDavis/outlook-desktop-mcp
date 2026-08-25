@@ -21,6 +21,10 @@ All notable changes to this project will be documented in this file.
   including ANSI property fallback and explicit `id_stable` availability
 - Exact folder/account-scoped Message-ID resolution for single and bulk email
   tools, with strict identifier validation and duplicate detection
+- Hermetic eight-criterion reliability acceptance coverage, including fake
+  stdio/SSE MCP transport checks and a stable machine-readable result artifact
+- Explicitly opt-in `live_outlook` acceptance harness that creates and cleans
+  only a uniquely named disposable draft
 
 ### Changed
 - COM requests now have configurable 30-second single-call and 90-second bulk
@@ -40,6 +44,10 @@ All notable changes to this project will be documented in this file.
   Message-IDs; attachment/category tools preserve generic EntryID behavior
 - Email move responses now include old/new EntryIDs and the stable Message-ID
 - Package version bumped to 0.5.0
+- `list_emails` now preserves its legacy JSON text while exposing native
+  queue/execution metadata when returned through MCP
+- README tool count corrected to 40 and reliability acceptance commands
+  documented
 
 ## [0.4.0] — 2026-08-11
 

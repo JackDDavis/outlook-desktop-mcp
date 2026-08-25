@@ -92,11 +92,11 @@ def test_mark_read_unread(namespace):
     item = unread.Item(1)
     subject = item.Subject
     log(f"  Target: '{subject}'")
-    log(f"  Marking as read...")
+    log("  Marking as read...")
     item.UnRead = False
     item.Save()
     log(f"  UnRead is now: {item.UnRead}")
-    log(f"  Restoring to unread...")
+    log("  Restoring to unread...")
     item.UnRead = True
     item.Save()
     log(f"  UnRead is now: {item.UnRead}")
@@ -135,9 +135,9 @@ def test_move_to_archive(namespace):
     log(f"  Archive now has {archive.Items.Count} items")
 
     # Move it back to inbox
-    log(f"  Moving it back to Inbox...")
+    log("  Moving it back to Inbox...")
     moved_item.Move(inbox)
-    log(f"  Restored to Inbox")
+    log("  Restored to Inbox")
 
 
 def test_search(namespace, keyword="test"):

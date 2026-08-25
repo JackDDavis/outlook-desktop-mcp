@@ -9,7 +9,7 @@
 > multi-account support, bulk operations, agent permission controls (`--deny`), and efficiency
 > improvements (`include_body`). See upstream for macOS support.
 
-**Turn your running Outlook Desktop into an MCP server with 39 tools — including full multi-account support.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
+**Turn your running Outlook Desktop into an MCP server with 40 tools — including full multi-account support.** No Microsoft Graph API, no Entra app registration, no OAuth tokens — just your local Outlook and the authentication you already have.
 
 Works with Claude Code, Claude Desktop, GitHub Copilot, OpenAI Codex, OpenClaw, and any MCP-compatible agent. Send emails, manage your calendar, create tasks, handle attachments, and more — across every email account configured in Outlook, with a single `account` parameter to target any of them.
 
@@ -93,7 +93,7 @@ outlook-desktop-mcp --http --host 127.0.0.1 --port 3721
 ```
 </details>
 
-**3. Open Outlook Desktop (Classic) and start a session.** That's it — 39 tools are available immediately.
+**3. Open Outlook Desktop (Classic) and start a session.** That's it — 40 tools are available immediately.
 
 ## Alternative Transport: stdio → SSE Proxy (recommended for elevated/WSL edge cases)
 
@@ -192,7 +192,7 @@ Internally, the server runs a dedicated COM thread (Single-Threaded Apartment) t
 - **Python 3.12+**
 - **Outlook must be running** when the MCP server starts
 
-## Available Tools (39)
+## Available Tools (40)
 
 All tool descriptions are optimized for LLM tool discovery — Claude understands exactly how to use each one, what arguments to pass, and what to expect back.
 
@@ -418,6 +418,41 @@ Once registered, just talk to Claude naturally:
 - *"Show unread emails from my work account"*
 - *"Mark all those emails as read"*
 
+## Reliability acceptance
+
+The default pytest configuration is hermetic and excludes tests marked
+`live_outlook`. It exercises fake COM, stdio MCP, SSE transport, and proxy
+behavior without starting Outlook or touching a mailbox.
+
+```powershell
+py -m pip install -e ".[dev]"
+py -m pytest -q
+py -m ruff check .
+```
+
+Run the focused v0.5.0 acceptance entry points with:
+
+```powershell
+py -m pytest tests/test_reliability_acceptance.py tests/test_mcp_acceptance.py -q
+```
+
+A successful hermetic run regenerates
+`tests/artifacts/reliability_acceptance.json`, a stable machine-readable result
+for all eight reliability criteria. It contains no machine paths or timestamps.
+
+The live Outlook harness is intentionally excluded from normal CI. It requires
+Windows, Outlook Desktop (Classic), and explicit opt-in:
+
+```powershell
+$env:OUTLOOK_MCP_RUN_LIVE_ACCEPTANCE = "1"
+py -m pytest -o addopts="" tests/live_reliability_acceptance.py -m live_outlook -q
+```
+
+The live harness creates one uniquely named disposable draft, reads only that
+item through MCP stdio, and deletes that exact item in `finally`. It never
+selects or mutates unrelated mailbox data. Do not enable it against a mailbox
+unless this disposable-item behavior is acceptable.
+
 ## Why Not Microsoft Graph?
 
 | | Microsoft Graph | outlook-desktop-mcp |
@@ -448,6 +483,10 @@ outlook-desktop-mcp/
       errors.py            # Structured, sanitized diagnostics
       responses.py         # MCP-native response and metadata helpers
   tests/
+    test_reliability_acceptance.py # Eight-criterion hermetic acceptance
+    test_mcp_acceptance.py         # Fake stdio/SSE MCP transport acceptance
+    live_reliability_acceptance.py # Explicitly opt-in real Outlook harness
+    artifacts/                     # Stable machine-readable acceptance result
     phase1_com_test.py     # Email COM validation
     phase3_mcp_test.py     # Email MCP test
     calendar_com_test.py   # Calendar COM validation

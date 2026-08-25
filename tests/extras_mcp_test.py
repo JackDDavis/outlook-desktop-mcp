@@ -169,7 +169,7 @@ async def run_tests():
                     # Clean up
                     if os.path.exists(data['path']):
                         os.remove(data['path'])
-                        log(f"  Cleaned up")
+                        log("  Cleaned up")
                 else:
                     log("  SKIP: No email with attachments found")
                 passed += 1

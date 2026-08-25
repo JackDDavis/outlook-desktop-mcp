@@ -1402,7 +1402,7 @@ async def list_emails(
                 results.append(format_email_summary(items.Item(i + 1), include_body=include_body))
             except Exception:
                 continue
-        return json.dumps(results, indent=2, default=str)
+        return tool_result(results)
 
     try:
         return await bridge.call(_list, folder, count, unread_only, include_body, start_date, end_date, account)
