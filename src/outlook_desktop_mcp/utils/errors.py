@@ -10,6 +10,7 @@ _logger = logging.getLogger("outlook_desktop_mcp.errors")
 
 _RPC_UNAVAILABLE = 0x800706BA
 _MAPI_EXCEPTION = 0x80020009
+_MAPI_NOT_FOUND = 0x8004010F
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,8 @@ def _definition_for(error: Exception, hresult: int | None) -> ErrorDefinition:
         return _NOT_FOUND_ERROR
     if isinstance(error, ValueError):
         return _VALIDATION_ERROR
+    if hresult == _MAPI_NOT_FOUND:
+        return _NOT_FOUND_ERROR
     if hresult is not None:
         return _HRESULT_ERRORS.get(hresult, _UNKNOWN_COM_ERROR)
     return _UNEXPECTED_ERROR

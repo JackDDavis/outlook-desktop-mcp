@@ -42,7 +42,6 @@ from outlook_desktop_mcp.tools._folder_constants import (
 from outlook_desktop_mcp.utils.errors import (
     error_details,
     error_envelope,
-    format_com_error,
 )
 from outlook_desktop_mcp.utils.formatting import (
     format_email_full,
@@ -90,14 +89,6 @@ def _check_item_class(item, expected_class: int, label: str) -> str | None:
     if item.Class != expected_class:
         return f"Error: Entry ID does not refer to a {label}."
     return None
-
-
-def _error_text(e: Exception) -> str:
-    """Prefer a specific message for non-COM exceptions."""
-    formatted = format_com_error(e)
-    if formatted == "An unexpected error occurred.":
-        return str(e)
-    return formatted
 
 
 def _tool_error(error: Exception):
@@ -501,12 +492,25 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
             try:
                 item = _resolve_email_item(namespace, entry_id, account)
                 if _matches_email_filters(item, sender, subject_contains, body_contains):
-                    items.append(item)
+                    items.append((entry_id, item))
+                else:
+                    failures.append({
+                        "id": entry_id,
+                        "entry_id": item.EntryID,
+                        "subject": item.Subject or "(no subject)",
+                        "received_time": str(item.ReceivedTime),
+                        "status": "skipped",
+                        "reason": "filter_mismatch",
+                        "error": None,
+                    })
             except Exception as e:
                 failures.append({
+                    "id": entry_id,
                     "entry_id": entry_id,
-                    "success": False,
-                    "error": _error_text(e),
+                    "subject": None,
+                    "received_time": None,
+                    "status": "failed",
+                    "error": error_details(e),
                 })
         return items, failures
 
@@ -520,21 +524,69 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
             item = mail_items.Item(i + 1)
             if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
                 failures.append({
+                    "id": getattr(item, "EntryID", ""),
                     "entry_id": getattr(item, "EntryID", ""),
-                    "success": False,
-                    "error": err,
+                    "subject": getattr(item, "Subject", None),
+                    "received_time": str(getattr(item, "ReceivedTime", "")) or None,
+                    "status": "failed",
+                    "error": error_details(ValueError(err)),
                 })
                 continue
             if _matches_email_filters(item, sender, subject_contains, body_contains):
-                items.append(item)
+                items.append((item.EntryID, item))
         except Exception as e:
             failures.append({
+                "id": "",
                 "entry_id": "",
-                "success": False,
-                "error": _error_text(e),
+                "subject": None,
+                "received_time": None,
+                "status": "failed",
+                "error": error_details(e),
             })
 
     return items, failures
+
+
+def _bulk_identity(identifier: str, item) -> dict:
+    return {
+        "id": identifier,
+        "entry_id": getattr(item, "EntryID", identifier),
+        "subject": getattr(item, "Subject", None) or "(no subject)",
+        "received_time": str(getattr(item, "ReceivedTime", "")) or None,
+    }
+
+
+def _bulk_payload(results: list[dict], matched_count: int) -> str:
+    summary = {
+        "total": len(results),
+        "ok": sum(row["status"] == "ok" for row in results),
+        "failed": sum(row["status"] == "failed" for row in results),
+        "skipped": sum(row["status"] == "skipped" for row in results),
+    }
+    return json.dumps({
+        "results": results,
+        "summary": summary,
+        "matched_count": matched_count,
+        "processed_count": len(results),
+        "success_count": summary["ok"],
+        "failure_count": summary["failed"],
+    }, indent=2, default=str)
+
+
+def _bulk_attempt(namespace, identifier: str, item, account: str, action):
+    identity = _bulk_identity(identifier, item)
+    try:
+        return action(item), identity, None, "ok"
+    except Exception:
+        try:
+            live_item = _resolve_email_item(namespace, identifier, account)
+        except Exception as refetch_error:
+            return None, identity, refetch_error, "refetch_failed"
+        identity = _bulk_identity(identifier, live_item)
+        try:
+            return action(live_item), identity, None, "retried"
+        except Exception as retry_error:
+            return None, identity, retry_error, "retry_failed"
 
 
 # =====================================================================
@@ -1482,23 +1534,21 @@ async def bulk_read_emails(
             raise
 
         results = list(failures)
-        for item in items:
+        for identifier, item in items:
+            email, identity, error, _attempt_state = _bulk_attempt(
+                namespace,
+                identifier,
+                item,
+                account,
+                format_email_full,
+            )
             results.append({
-                "entry_id": item.EntryID,
-                "success": True,
-                "email": format_email_full(item),
+                **identity,
+                "status": "failed" if error else "ok",
+                "email": email,
+                "error": error_details(error) if error else None,
             })
-
-        success_count = sum(1 for r in results if r.get("success"))
-        failure_count = len(results) - success_count
-        payload = {
-            "matched_count": len(items),
-            "processed_count": len(results),
-            "success_count": success_count,
-            "failure_count": failure_count,
-            "results": results,
-        }
-        return json.dumps(payload, indent=2, default=str)
+        return _bulk_payload(results, len(items))
 
     try:
         return await bridge.call(
@@ -1555,35 +1605,27 @@ async def bulk_mark_as_read(
         except Exception:
             raise
 
-        results = list(failures)
-        for item in items:
-            try:
-                subject = item.Subject or "(no subject)"
-                item.UnRead = False
-                item.Save()
-                results.append({
-                    "entry_id": item.EntryID,
-                    "subject": subject,
-                    "success": True,
-                    "action": "marked_as_read",
-                })
-            except Exception as e:
-                results.append({
-                    "entry_id": getattr(item, "EntryID", ""),
-                    "subject": getattr(item, "Subject", "(no subject)"),
-                    "success": False,
-                    "error": _error_text(e),
-                })
+        def mark(item):
+            item.UnRead = False
+            item.Save()
+            return {"action": "marked_as_read"}
 
-        success_count = sum(1 for r in results if r.get("success"))
-        payload = {
-            "matched_count": len(items),
-            "processed_count": len(results),
-            "success_count": success_count,
-            "failure_count": len(results) - success_count,
-            "results": results,
-        }
-        return json.dumps(payload, indent=2, default=str)
+        results = list(failures)
+        for identifier, item in items:
+            action, identity, error, _attempt_state = _bulk_attempt(
+                namespace,
+                identifier,
+                item,
+                account,
+                mark,
+            )
+            results.append({
+                **identity,
+                "status": "failed" if error else "ok",
+                **(action or {}),
+                "error": error_details(error) if error else None,
+            })
+        return _bulk_payload(results, len(items))
 
     try:
         return await bridge.call(
@@ -1640,35 +1682,27 @@ async def bulk_mark_as_unread(
         except Exception:
             raise
 
-        results = list(failures)
-        for item in items:
-            try:
-                subject = item.Subject or "(no subject)"
-                item.UnRead = True
-                item.Save()
-                results.append({
-                    "entry_id": item.EntryID,
-                    "subject": subject,
-                    "success": True,
-                    "action": "marked_as_unread",
-                })
-            except Exception as e:
-                results.append({
-                    "entry_id": getattr(item, "EntryID", ""),
-                    "subject": getattr(item, "Subject", "(no subject)"),
-                    "success": False,
-                    "error": _error_text(e),
-                })
+        def mark(item):
+            item.UnRead = True
+            item.Save()
+            return {"action": "marked_as_unread"}
 
-        success_count = sum(1 for r in results if r.get("success"))
-        payload = {
-            "matched_count": len(items),
-            "processed_count": len(results),
-            "success_count": success_count,
-            "failure_count": len(results) - success_count,
-            "results": results,
-        }
-        return json.dumps(payload, indent=2, default=str)
+        results = list(failures)
+        for identifier, item in items:
+            action, identity, error, _attempt_state = _bulk_attempt(
+                namespace,
+                identifier,
+                item,
+                account,
+                mark,
+            )
+            results.append({
+                **identity,
+                "status": "failed" if error else "ok",
+                **(action or {}),
+                "error": error_details(error) if error else None,
+            })
+        return _bulk_payload(results, len(items))
 
     try:
         return await bridge.call(
@@ -1734,37 +1768,49 @@ async def bulk_move_emails(
         except Exception:
             raise
 
-        results = list(failures)
-        for item in items:
-            try:
-                old_entry_id = item.EntryID
-                subject = item.Subject or "(no subject)"
-                moved = item.Move(dest)
-                results.append({
-                    "entry_id": old_entry_id,
-                    "new_entry_id": getattr(moved, "EntryID", ""),
-                    "subject": subject,
-                    "success": True,
-                    "action": "moved",
-                    "target_folder": target_folder,
-                })
-            except Exception as e:
-                results.append({
-                    "entry_id": getattr(item, "EntryID", ""),
-                    "subject": getattr(item, "Subject", "(no subject)"),
-                    "success": False,
-                    "error": _error_text(e),
-                })
+        for row in failures:
+            if (row.get("error") or {}).get("code") == "not_found":
+                row["status"] = "skipped"
+                row["reason"] = "not_found_in_source"
+                row["error"] = None
 
-        success_count = sum(1 for r in results if r.get("success"))
-        payload = {
-            "matched_count": len(items),
-            "processed_count": len(results),
-            "success_count": success_count,
-            "failure_count": len(results) - success_count,
-            "results": results,
-        }
-        return json.dumps(payload, indent=2, default=str)
+        def move(item):
+            moved = item.Move(dest)
+            return {
+                "action": "moved",
+                "target_folder": target_folder,
+                "new_entry_id": getattr(moved, "EntryID", ""),
+            }
+
+        results = list(failures)
+        for identifier, item in items:
+            action, identity, error, attempt_state = _bulk_attempt(
+                namespace,
+                identifier,
+                item,
+                account,
+                move,
+            )
+            if (
+                error
+                and error_details(error)["code"] == "not_found"
+                and attempt_state == "refetch_failed"
+            ):
+                status = "skipped"
+                reason = "moved_or_gone_unconfirmed"
+                diagnostic = error_details(error)
+            else:
+                status = "failed" if error else "ok"
+                reason = None
+                diagnostic = error_details(error) if error else None
+            results.append({
+                **identity,
+                "status": status,
+                **(action or {}),
+                "reason": reason,
+                "error": diagnostic,
+            })
+        return _bulk_payload(results, len(items))
 
     try:
         return await bridge.call(

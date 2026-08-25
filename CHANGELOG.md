@@ -13,6 +13,8 @@ All notable changes to this project will be documented in this file.
 - Local time, timezone, and input interpretation echoes on calendar writes
 - Sender filtering on `search_emails`, with DASL on Exchange/MAPI accounts
   and bounded client-side fallback on IMAP/POP accounts
+- Standard bulk result rows with requested ID, subject, received time, status,
+  structured error, and aggregate ok/failed/skipped summary
 
 ### Changed
 - COM requests now have configurable 30-second single-call and 90-second bulk
@@ -22,6 +24,8 @@ All notable changes to this project will be documented in this file.
 - Calendar and non-calendar tool failures use the same MCP-native error shape
 - Sender-filter responses report `filter_mode` and whether the 1000-item
   client-side scan window was truncated
+- Bulk item failures are re-fetched from Outlook and retried once; repeated
+  moves of items already absent from the source report idempotent skips
 - Package version bumped to 0.5.0
 
 ## [0.4.0] — 2026-08-11

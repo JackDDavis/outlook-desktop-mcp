@@ -293,6 +293,15 @@ When `search_emails` receives `sender`, its response includes
 Outlook DASL; IMAP/POP accounts use a client-side scan capped at 1000 items.
 `truncated: true` means older matches may exist outside that scan window.
 
+Bulk tools return a `results` row for every requested or selected item. Each
+row echoes `id`, `subject`, `received_time`, `status`, and any structured
+`error`; `summary` reports total, ok, failed, and skipped counts. Outlook COM
+failures are re-fetched and retried once. Re-running a move after the source
+item is already gone returns `skipped` with `not_found_in_source`.
+If Outlook throws after a move may already have completed and the old ID can
+no longer be resolved, the row reports `moved_or_gone_unconfirmed`; verify the
+destination before retrying.
+
 Example:
 
 ```json
