@@ -9,6 +9,13 @@ from outlook_desktop_mcp.tools._folder_constants import (
     IMPORTANCE_NAMES,
 )
 
+PR_INTERNET_MESSAGE_ID_UNICODE = (
+    "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
+)
+PR_INTERNET_MESSAGE_ID_ANSI = (
+    "http://schemas.microsoft.com/mapi/proptag/0x1035001E"
+)
+
 
 def truncate(text: str, max_length: int = 2000) -> str:
     if len(text) <= max_length:
@@ -22,6 +29,31 @@ def strip_html(html: str) -> str:
     return text
 
 
+def format_message_identity(item) -> dict:
+    """Return the stable internet Message-ID when Outlook exposes it."""
+    try:
+        accessor = getattr(item, "PropertyAccessor", None)
+    except Exception:
+        accessor = None
+    if accessor is None:
+        return {"message_id": None, "id_stable": False}
+
+    for property_name in (
+        PR_INTERNET_MESSAGE_ID_UNICODE,
+        PR_INTERNET_MESSAGE_ID_ANSI,
+    ):
+        try:
+            value = accessor.GetProperty(property_name)
+        except Exception:
+            continue
+        if isinstance(value, bytes):
+            value = value.decode("cp1252", errors="replace")
+        value = str(value or "").strip()
+        if value:
+            return {"message_id": value, "id_stable": True}
+    return {"message_id": None, "id_stable": False}
+
+
 def format_email_summary(item, include_body: bool = False) -> dict:
     """Extract key fields from an Outlook MailItem into a dict."""
     result = {
@@ -33,6 +65,7 @@ def format_email_summary(item, include_body: bool = False) -> dict:
         "unread": bool(item.UnRead),
         "has_attachments": bool(item.Attachments.Count > 0),
         "attachment_count": item.Attachments.Count,
+        **format_message_identity(item),
     }
     if include_body:
         result["to"] = item.To or ""

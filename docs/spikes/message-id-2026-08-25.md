@@ -32,3 +32,12 @@ folder. Continue using `GetItemFromID` for Outlook EntryIDs. Report
 The two inboxes above 1000 items require an unbounded or paged release
 acceptance probe before claiming exhaustive per-store coverage. The bounded
 spike establishes 100% coverage in the sampled window, not the entire inbox.
+
+## Implemented behavior
+
+The reliability v0.5.0 implementation exposes `message_id` and `id_stable` on
+all email summary/full and bulk result shapes. Email-targeting tools accept
+strict Outlook EntryIDs or exact folder/account-scoped Message-IDs, reject
+duplicates as ambiguous, and retain generic EntryID behavior for non-mail
+attachment/category targets. Move responses return old/new EntryIDs plus the
+stable Message-ID.

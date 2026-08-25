@@ -17,6 +17,10 @@ All notable changes to this project will be documented in this file.
   structured error, and aggregate ok/failed/skipped summary
 - Pollable bounded bulk operations via `outlook_operation_status`, with atomic
   72-hour snapshots and interrupted-restart recovery guidance
+- Stable internet Message-ID extraction on every email summary/full shape,
+  including ANSI property fallback and explicit `id_stable` availability
+- Exact folder/account-scoped Message-ID resolution for single and bulk email
+  tools, with strict identifier validation and duplicate detection
 
 ### Changed
 - COM requests now have configurable 30-second single-call and 90-second bulk
@@ -32,6 +36,9 @@ All notable changes to this project will be documented in this file.
   `in_progress` operation when the configurable `MCP_OP_BUDGET_SECONDS`
   caller budget is exceeded
 - `outlook_status` now reports `operations_in_flight`
+- Email-targeting tools now accept either Outlook EntryIDs or internet
+  Message-IDs; attachment/category tools preserve generic EntryID behavior
+- Email move responses now include old/new EntryIDs and the stable Message-ID
 - Package version bumped to 0.5.0
 
 ## [0.4.0] — 2026-08-11

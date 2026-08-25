@@ -23,7 +23,6 @@ from outlook_desktop_mcp.com_bridge import OutlookBridge
 from outlook_desktop_mcp.operations import OperationManager
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
-    IMPORTANCE_NAMES,
     OL_APPOINTMENT_ITEM,
     OL_FOLDER_CALENDAR,
     OL_FOLDER_DRAFTS,
@@ -39,17 +38,19 @@ from outlook_desktop_mcp.tools._folder_constants import (
     OL_RESPONSE_TENTATIVE,
     OL_TASK_COMPLETE,
     OL_TASK_ITEM,
-    TASK_STATUS_NAMES,
 )
 from outlook_desktop_mcp.utils.errors import (
     error_details,
     error_envelope,
 )
 from outlook_desktop_mcp.utils.formatting import (
+    PR_INTERNET_MESSAGE_ID_ANSI,
+    PR_INTERNET_MESSAGE_ID_UNICODE,
     format_email_full,
     format_email_summary,
     format_event_full,
     format_event_summary,
+    format_message_identity,
     format_task_full,
     format_task_summary,
 )
@@ -331,22 +332,124 @@ def _resolve_folder(namespace, folder_name: str, store=None):
 
 
 def _parse_entry_ids(entry_ids: str) -> list[str]:
-    """Parse a comma/semicolon/newline-delimited EntryID string."""
+    """Parse a delimited list of Outlook EntryIDs or internet Message-IDs."""
     if not entry_ids.strip():
         return []
     return [part.strip() for part in re.split(r"[,\n;]+", entry_ids) if part.strip()]
 
 
-def _resolve_email_item(namespace, entry_id: str, account: str = ""):
-    """Resolve one email item, using the account store when provided."""
+_ENTRY_ID_RE = re.compile(r"00000000[0-9A-Fa-f]{56,}\Z")
+_IDENTIFIER_FORMATS = (
+    "an Outlook EntryID (a long hexadecimal value beginning 00000000) or "
+    "an internet Message-ID (for example <local@domain> or another single "
+    "header-like value containing @)"
+)
+
+
+def _classify_email_identifier(identifier: str) -> str:
+    """Classify a strict Outlook EntryID or internet Message-ID."""
+    value = (identifier or "").strip()
+    if _ENTRY_ID_RE.fullmatch(value) and len(value) % 2 == 0:
+        return "entry_id"
+
+    if "@" in value:
+        has_unsafe_separator = any(char in value for char in "\r\n,;")
+        angle_count = (value.count("<"), value.count(">"))
+        angles_valid = angle_count == (0, 0) or (
+            angle_count == (1, 1)
+            and value.startswith("<")
+            and value.endswith(">")
+            and not any(char.isspace() for char in value[1:-1])
+        )
+        if not has_unsafe_separator and angles_valid:
+            return "message_id"
+        raise ValueError(
+            f"Identifier is ambiguous; provide exactly one {_IDENTIFIER_FORMATS}."
+        )
+
+    raise ValueError(f"Identifier must be {_IDENTIFIER_FORMATS}.")
+
+
+def _message_id_restriction(property_name: str, message_id: str) -> str:
+    escaped = message_id.replace("'", "''")
+    return f'@SQL="{property_name}" = \'{escaped}\''
+
+
+def _resolve_message_id_item(
+    namespace,
+    message_id: str,
+    account: str,
+    folder: str,
+):
+    if not folder.strip():
+        raise ValueError(
+            "A folder is required when resolving an internet Message-ID."
+        )
+    store = _require_store(namespace, account)
+    target = _resolve_folder(namespace, folder, store)
+    if not target:
+        raise ValueError(f"Folder '{folder}' not found")
+
+    for property_name in (
+        PR_INTERNET_MESSAGE_ID_UNICODE,
+        PR_INTERNET_MESSAGE_ID_ANSI,
+    ):
+        matches = target.Items.Restrict(
+            _message_id_restriction(property_name, message_id)
+        )
+        if matches.Count > 1:
+            raise ValueError(
+                f"Message-ID '{message_id}' is ambiguous: {matches.Count} "
+                f"items matched in folder '{folder}'. Specify a different "
+                "account or folder."
+            )
+        if matches.Count == 1:
+            item = matches.Item(1)
+            if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
+                raise ValueError(err)
+            return item
+
+    raise LookupError(
+        f"No email with Message-ID '{message_id}' found in folder '{folder}'"
+    )
+
+
+def _resolve_email_item(
+    namespace,
+    identifier: str,
+    account: str = "",
+    folder: str = "inbox",
+):
+    """Resolve one mail item by EntryID or folder-scoped internet Message-ID."""
+    identifier = identifier.strip()
+    identifier_kind = _classify_email_identifier(identifier)
+    if identifier_kind == "message_id":
+        return _resolve_message_id_item(namespace, identifier, account, folder)
+
     if account:
         store = _require_store(namespace, account)
-        item = namespace.GetItemFromID(entry_id, store.StoreID)
+        item = namespace.GetItemFromID(identifier, store.StoreID)
     else:
-        item = namespace.GetItemFromID(entry_id)
+        item = namespace.GetItemFromID(identifier)
     if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
         raise ValueError(err)
     return item
+
+
+def _resolve_outlook_item(
+    namespace,
+    identifier: str,
+    account: str = "",
+    folder: str = "inbox",
+):
+    """Resolve Message-IDs as mail while preserving generic EntryID behavior."""
+    identifier = identifier.strip()
+    if _classify_email_identifier(identifier) == "message_id":
+        return _resolve_message_id_item(namespace, identifier, account, folder)
+    if account:
+        store = _require_store(namespace, account)
+        return namespace.GetItemFromID(identifier, store.StoreID)
+    return namespace.GetItemFromID(identifier)
 
 
 def _build_email_items(namespace, folder: str, unread_only: bool,
@@ -493,25 +596,26 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
     failures = []
 
     if parsed_ids:
-        for entry_id in parsed_ids[:count]:
+        for identifier in parsed_ids[:count]:
             try:
-                item = _resolve_email_item(namespace, entry_id, account)
+                item = _resolve_email_item(
+                    namespace,
+                    identifier,
+                    account,
+                    folder,
+                )
                 if _matches_email_filters(item, sender, subject_contains, body_contains):
-                    items.append((entry_id, item))
+                    items.append((identifier, item))
                 else:
                     failures.append({
-                        "id": entry_id,
-                        "entry_id": item.EntryID,
-                        "subject": item.Subject or "(no subject)",
-                        "received_time": str(item.ReceivedTime),
+                        **_bulk_identity(identifier, item),
                         "status": "skipped",
                         "reason": "filter_mismatch",
                         "error": None,
                     })
             except Exception as e:
                 failures.append({
-                    "id": entry_id,
-                    "entry_id": entry_id,
+                    **_requested_bulk_identity(identifier),
                     "subject": None,
                     "received_time": None,
                     "status": "failed",
@@ -531,6 +635,7 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
                 failures.append({
                     "id": getattr(item, "EntryID", ""),
                     "entry_id": getattr(item, "EntryID", ""),
+                    **format_message_identity(item),
                     "subject": getattr(item, "Subject", None),
                     "received_time": str(getattr(item, "ReceivedTime", "")) or None,
                     "status": "failed",
@@ -543,6 +648,8 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
             failures.append({
                 "id": "",
                 "entry_id": "",
+                "message_id": None,
+                "id_stable": False,
                 "subject": None,
                 "received_time": None,
                 "status": "failed",
@@ -556,8 +663,22 @@ def _bulk_identity(identifier: str, item) -> dict:
     return {
         "id": identifier,
         "entry_id": getattr(item, "EntryID", identifier),
+        **format_message_identity(item),
         "subject": getattr(item, "Subject", None) or "(no subject)",
         "received_time": str(getattr(item, "ReceivedTime", "")) or None,
+    }
+
+
+def _requested_bulk_identity(identifier: str) -> dict:
+    try:
+        identifier_kind = _classify_email_identifier(identifier)
+    except ValueError:
+        identifier_kind = None
+    return {
+        "id": identifier,
+        "entry_id": identifier if identifier_kind == "entry_id" else None,
+        "message_id": identifier if identifier_kind == "message_id" else None,
+        "id_stable": identifier_kind == "message_id",
     }
 
 
@@ -578,13 +699,25 @@ def _bulk_payload(results: list[dict], matched_count: int) -> str:
     }, indent=2, default=str)
 
 
-def _bulk_attempt(namespace, identifier: str, item, account: str, action):
+def _bulk_attempt(
+    namespace,
+    identifier: str,
+    item,
+    account: str,
+    folder: str,
+    action,
+):
     identity = _bulk_identity(identifier, item)
     try:
         return action(item), identity, None, "ok"
     except Exception:
         try:
-            live_item = _resolve_email_item(namespace, identifier, account)
+            live_item = _resolve_email_item(
+                namespace,
+                identifier,
+                account,
+                folder,
+            )
         except Exception as refetch_error:
             return None, identity, refetch_error, "refetch_failed"
         identity = _bulk_identity(identifier, live_item)
@@ -676,8 +809,7 @@ def _prepare_bulk_email_operation(
 
 def _bulk_resolution_failure(identifier: str, error: Exception) -> dict:
     return {
-        "id": identifier,
-        "entry_id": identifier,
+        **_requested_bulk_identity(identifier),
         "subject": None,
         "received_time": None,
         "status": "failed",
@@ -685,11 +817,17 @@ def _bulk_resolution_failure(identifier: str, error: Exception) -> dict:
     }
 
 
-def _process_bulk_read_batch(outlook, namespace, identifiers, account):
+def _process_bulk_read_batch(
+    outlook,
+    namespace,
+    identifiers,
+    account,
+    folder,
+):
     results = []
     for identifier in identifiers:
         try:
-            item = _resolve_email_item(namespace, identifier, account)
+            item = _resolve_email_item(namespace, identifier, account, folder)
         except Exception as error:
             results.append(_bulk_resolution_failure(identifier, error))
             continue
@@ -698,6 +836,7 @@ def _process_bulk_read_batch(outlook, namespace, identifiers, account):
             identifier,
             item,
             account,
+            folder,
             format_email_full,
         )
         results.append({
@@ -709,7 +848,14 @@ def _process_bulk_read_batch(outlook, namespace, identifiers, account):
     return results
 
 
-def _process_bulk_mark_batch(outlook, namespace, identifiers, account, unread):
+def _process_bulk_mark_batch(
+    outlook,
+    namespace,
+    identifiers,
+    account,
+    folder,
+    unread,
+):
     action_name = "marked_as_unread" if unread else "marked_as_read"
 
     def mark(item):
@@ -720,7 +866,7 @@ def _process_bulk_mark_batch(outlook, namespace, identifiers, account, unread):
     results = []
     for identifier in identifiers:
         try:
-            item = _resolve_email_item(namespace, identifier, account)
+            item = _resolve_email_item(namespace, identifier, account, folder)
         except Exception as error:
             results.append(_bulk_resolution_failure(identifier, error))
             continue
@@ -729,6 +875,7 @@ def _process_bulk_mark_batch(outlook, namespace, identifiers, account, unread):
             identifier,
             item,
             account,
+            folder,
             mark,
         )
         results.append({
@@ -745,6 +892,7 @@ def _process_bulk_move_batch(
     namespace,
     identifiers,
     account,
+    folder,
     target_folder,
 ):
     store = _require_store(namespace, account)
@@ -756,17 +904,20 @@ def _process_bulk_move_batch(
         )
 
     def move(item):
+        old_entry_id = getattr(item, "EntryID", "")
         moved = item.Move(destination)
         return {
             "action": "moved",
             "target_folder": target_folder,
+            "old_entry_id": old_entry_id,
             "new_entry_id": getattr(moved, "EntryID", ""),
+            **format_message_identity(moved),
         }
 
     results = []
     for identifier in identifiers:
         try:
-            item = _resolve_email_item(namespace, identifier, account)
+            item = _resolve_email_item(namespace, identifier, account, folder)
         except Exception as error:
             if error_details(error)["code"] == "not_found":
                 row = _bulk_resolution_failure(identifier, error)
@@ -784,6 +935,7 @@ def _process_bulk_move_batch(
             identifier,
             item,
             account,
+            folder,
             move,
         )
         if (
@@ -1190,11 +1342,11 @@ async def list_emails(
     """List recent emails from a specified Outlook folder.
 
     Returns a JSON array of email summaries sorted by received time (newest
-    first). Each summary includes entry_id, subject, sender, sender_name,
-    received_time, unread status, and attachment info.
+    first). Each summary includes entry_id, message_id, id_stable, subject,
+    sender, sender_name, received_time, unread status, and attachment info.
 
-    Use the entry_id from results to read full content with read_email,
-    or to perform actions like mark_as_read, move_email, or reply_email.
+    Use entry_id for direct Outlook lookup, or message_id with the matching
+    account/folder for an identity that survives moves.
 
     Args:
         folder: The folder to list. Case-insensitive names: "inbox" (default),
@@ -1272,27 +1424,28 @@ async def read_email(
     """Read the full content of a specific email.
 
     Retrieves complete email details including body text, recipients, CC,
-    and metadata. Provide EITHER entry_id (preferred, exact match) OR
+    and metadata. Provide EITHER entry_id (an Outlook EntryID or internet
+    Message-ID) OR
     subject_search (finds most recent match by subject substring).
 
     Args:
-        entry_id: The unique Outlook EntryID of the email. Most reliable way
-            to identify a specific email. Get this from list_emails or
-            search_emails results.
+        entry_id: An Outlook EntryID or internet Message-ID from list_emails or
+            search_emails. Message-ID lookup is exact within folder/account.
         subject_search: Alternative to entry_id. A case-insensitive substring
             to search for in email subjects. Returns the most recent match.
-        folder: Folder to search when using subject_search. Ignored when
-            entry_id is provided. Default "inbox".
+        folder: Folder to search for subject_search or Message-ID lookup.
+            Default "inbox".
         account: Optional. Account display name (or substring) to target.
             Default: primary account. Use list_accounts to see available accounts.
 
     Returns:
         JSON object with full email details (entry_id, subject, sender,
-        sender_name, received_time, unread, to, cc, body, attachment info).
+        sender_name, received_time, unread, to, cc, body, attachment info,
+        message_id, and id_stable).
     """
     def _read(outlook, namespace, entry_id, subject_search, folder, account):
         if entry_id:
-            item = namespace.GetItemFromID(entry_id)
+            item = _resolve_email_item(namespace, entry_id, account, folder)
             return json.dumps(format_email_full(item), indent=2, default=str)
 
         if not subject_search:
@@ -1325,36 +1478,35 @@ async def read_email(
 # =====================================================================
 
 @mcp.tool()
-async def mark_as_read(entry_id: str, account: str = "") -> str:
+async def mark_as_read(
+    entry_id: str,
+    account: str = "",
+    folder: str = "inbox",
+) -> str:
     """Mark a specific email as read in Outlook.
 
     Changes the unread status to read, same as clicking on an email in Outlook.
     The change is persisted immediately and synced to the server.
 
     Args:
-        entry_id: The unique Outlook EntryID of the email. Get this from
-            list_emails or search_emails results.
+        entry_id: An Outlook EntryID or internet Message-ID.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        folder: Folder containing the email when entry_id is a Message-ID.
+            Default "inbox".
 
     Returns:
         Confirmation message with the email subject, or an error.
     """
-    def _mark(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
-        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            raise ValueError(err)
+    def _mark(outlook, namespace, entry_id, account, folder):
+        item = _resolve_email_item(namespace, entry_id, account, folder)
         subject = item.Subject
         item.UnRead = False
         item.Save()
         return f"Marked as read: '{subject}'"
 
     try:
-        return await bridge.call(_mark, entry_id, account)
+        return await bridge.call(_mark, entry_id, account, folder)
     except Exception as e:
         return _tool_error(e)
 
@@ -1364,36 +1516,35 @@ async def mark_as_read(entry_id: str, account: str = "") -> str:
 # =====================================================================
 
 @mcp.tool()
-async def mark_as_unread(entry_id: str, account: str = "") -> str:
+async def mark_as_unread(
+    entry_id: str,
+    account: str = "",
+    folder: str = "inbox",
+) -> str:
     """Mark a specific email as unread in Outlook.
 
     Restores a previously read email to unread status. Useful for flagging
     emails that need follow-up attention. Persisted immediately.
 
     Args:
-        entry_id: The unique Outlook EntryID of the email. Get this from
-            list_emails or search_emails results.
+        entry_id: An Outlook EntryID or internet Message-ID.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        folder: Folder containing the email when entry_id is a Message-ID.
+            Default "inbox".
 
     Returns:
         Confirmation message with the email subject, or an error.
     """
-    def _mark(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
-        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            raise ValueError(err)
+    def _mark(outlook, namespace, entry_id, account, folder):
+        item = _resolve_email_item(namespace, entry_id, account, folder)
         subject = item.Subject
         item.UnRead = True
         item.Save()
         return f"Marked as unread: '{subject}'"
 
     try:
-        return await bridge.call(_mark, entry_id, account)
+        return await bridge.call(_mark, entry_id, account, folder)
     except Exception as e:
         return _tool_error(e)
 
@@ -1407,6 +1558,7 @@ async def move_email(
     entry_id: str,
     target_folder: str = "archive",
     account: str = "",
+    folder: str = "inbox",
 ) -> str:
     """Move an email to a different Outlook folder.
 
@@ -1415,21 +1567,21 @@ async def move_email(
     becomes invalid. Common use: archiving emails after processing.
 
     Args:
-        entry_id: The unique Outlook EntryID of the email to move.
+        entry_id: An Outlook EntryID or internet Message-ID.
         target_folder: Destination folder name. Default is "archive". Supports
             same names as list_emails: "archive", "inbox", "sent", "deleted"/
             "trash", "drafts", "junk"/"spam", or any custom folder name.
         account: Optional. Account display name (or substring) to resolve
             the target folder in. Default: primary account.
+        folder: Source folder used for Message-ID lookup. Default "inbox".
 
     Returns:
-        Confirmation with email subject and destination, or an error.
+        JSON confirmation with old/new EntryIDs and stable Message-ID.
     """
-    def _move(outlook, namespace, entry_id, target_folder, account):
-        item = namespace.GetItemFromID(entry_id)
-        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            raise ValueError(err)
+    def _move(outlook, namespace, entry_id, target_folder, account, folder):
+        item = _resolve_email_item(namespace, entry_id, account, folder)
         subject = item.Subject
+        old_entry_id = item.EntryID
 
         store = _require_store(namespace, account)
         dest = _resolve_folder(namespace, target_folder, store)
@@ -1439,11 +1591,24 @@ async def move_email(
                 "Use list_folders to see available folders."
             )
 
-        item.Move(dest)
-        return f"Moved '{subject}' to {target_folder}"
+        moved = item.Move(dest)
+        return json.dumps({
+            "status": "moved",
+            "subject": subject,
+            "target_folder": target_folder,
+            "old_entry_id": old_entry_id,
+            "new_entry_id": moved.EntryID,
+            **format_message_identity(moved),
+        }, indent=2, default=str)
 
     try:
-        return await bridge.call(_move, entry_id, target_folder, account)
+        return await bridge.call(
+            _move,
+            entry_id,
+            target_folder,
+            account,
+            folder,
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -1458,6 +1623,7 @@ async def reply_email(
     body: str,
     reply_all: bool = False,
     account: str = "",
+    folder: str = "inbox",
 ) -> str:
     """Reply to an email in Outlook.
 
@@ -1465,25 +1631,21 @@ async def reply_email(
     Use reply_all=True to reply to all recipients (sender + CC list).
 
     Args:
-        entry_id: The unique Outlook EntryID of the email to reply to.
+        entry_id: An Outlook EntryID or internet Message-ID.
         body: The reply message text. Prepended above the original message
             in the email thread.
         reply_all: If true, reply to all recipients (sender + all CC/To).
             If false (default), reply only to the sender.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        folder: Folder containing the email when entry_id is a Message-ID.
+            Default "inbox".
 
     Returns:
         Confirmation indicating the reply was sent, or an error.
     """
-    def _reply(outlook, namespace, entry_id, body, reply_all, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
-        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            raise ValueError(err)
+    def _reply(outlook, namespace, entry_id, body, reply_all, account, folder):
+        item = _resolve_email_item(namespace, entry_id, account, folder)
         subject = item.Subject
         reply_item = item.ReplyAll() if reply_all else item.Reply()
         reply_item.Body = body + "\n\n" + reply_item.Body
@@ -1491,7 +1653,14 @@ async def reply_email(
         return f"Reply sent to '{subject}' (reply_all={reply_all})"
 
     try:
-        return await bridge.call(_reply, entry_id, body, reply_all, account)
+        return await bridge.call(
+            _reply,
+            entry_id,
+            body,
+            reply_all,
+            account,
+            folder,
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -1508,6 +1677,7 @@ async def forward_email(
     cc: str = "",
     bcc: str = "",
     account: str = "",
+    folder: str = "inbox",
 ) -> str:
     """Forward an email to new recipients, preserving the original content and attachments.
 
@@ -1515,26 +1685,31 @@ async def forward_email(
     (headers, body, and all attachments) is included automatically.
 
     Args:
-        entry_id: The unique Outlook EntryID of the email to forward.
-            Get this from list_emails, read_email, or search_emails results.
+        entry_id: An Outlook EntryID or internet Message-ID.
         to: One or more recipient email addresses, separated by semicolons.
         body: Optional. Additional message to prepend above the forwarded content.
         cc: Optional. CC recipients, separated by semicolons.
         bcc: Optional. BCC recipients, separated by semicolons.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        folder: Folder containing the email when entry_id is a Message-ID.
+            Default "inbox".
 
     Returns:
         Confirmation indicating the email was forwarded, or an error.
     """
-    def _forward(outlook, namespace, entry_id, to, body, cc, bcc, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
-        if err := _check_item_class(item, _OL_CLASS_MAIL, "mail item"):
-            raise ValueError(err)
+    def _forward(
+        outlook,
+        namespace,
+        entry_id,
+        to,
+        body,
+        cc,
+        bcc,
+        account,
+        folder,
+    ):
+        item = _resolve_email_item(namespace, entry_id, account, folder)
         subject = item.Subject
         fwd = item.Forward()
         fwd.To = to
@@ -1548,7 +1723,16 @@ async def forward_email(
         return f"Forwarded '{subject}' to {to}"
 
     try:
-        return await bridge.call(_forward, entry_id, to, body, cc, bcc, account)
+        return await bridge.call(
+            _forward,
+            entry_id,
+            to,
+            body,
+            cc,
+            bcc,
+            account,
+            folder,
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -1651,7 +1835,7 @@ async def search_emails(
 
     Searches email subjects and bodies using Outlook's DASL filter.
     Results are sorted by received time (newest first). Each result
-    includes entry_id for further operations.
+    includes entry_id plus stable message_id/id_stable fields.
 
     Args:
         query: The search term (case-insensitive substring match).
@@ -1793,16 +1977,19 @@ async def bulk_read_emails(
     """Read multiple emails in one tool call.
 
     Use this when you need more than one full email body at a time. You can
-    either provide explicit EntryIDs or select emails from a folder using
-    filters such as sender, subject_contains, unread_only, and date range.
+    either provide explicit Outlook EntryIDs/internet Message-IDs or select
+    emails from a folder using filters such as sender, subject_contains,
+    unread_only, and date range.
 
     Args:
-        entry_ids: Optional. Comma/semicolon/newline-delimited EntryIDs to read.
+        entry_ids: Optional. Comma/semicolon/newline-delimited Outlook EntryIDs
+            or internet Message-IDs to read.
         sender: Optional. Case-insensitive substring match against sender email
             address or display name.
         subject_contains: Optional. Case-insensitive substring match in subject.
         body_contains: Optional. Case-insensitive substring match in body text.
-        folder: Folder to search when entry_ids is not provided. Default "inbox".
+        folder: Folder to search, and the scope for Message-ID lookup.
+            Default "inbox".
         unread_only: If true, only include unread messages.
         start_date: Optional. Only include emails received on or after this date.
         end_date: Optional. Only include emails received on or before this date.
@@ -1830,7 +2017,7 @@ async def bulk_read_emails(
                 "",
             ),
             process_function=_process_bulk_read_batch,
-            process_args=(account,),
+            process_args=(account, folder),
             initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
@@ -1852,9 +2039,9 @@ async def bulk_mark_as_read(
 ) -> str:
     """Mark multiple emails as read.
 
-    Provide explicit EntryIDs or select emails with filters. For safety, when
-    entry_ids is omitted you must provide at least one real selector such as
-    sender, subject_contains, body_contains, unread_only, or a date range.
+    Provide explicit Outlook EntryIDs/internet Message-IDs or select emails
+    with filters. Message-ID lookup is scoped by folder/account. For safety,
+    when entry_ids is omitted you must provide at least one real selector.
     """
     try:
         if not entry_ids.strip() and not _has_bulk_filter(
@@ -1884,7 +2071,7 @@ async def bulk_mark_as_read(
                 "",
             ),
             process_function=_process_bulk_mark_batch,
-            process_args=(account, False),
+            process_args=(account, folder, False),
             initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
@@ -1906,9 +2093,9 @@ async def bulk_mark_as_unread(
 ) -> str:
     """Mark multiple emails as unread.
 
-    Provide explicit EntryIDs or select emails with filters. For safety, when
-    entry_ids is omitted you must provide at least one real selector such as
-    sender, subject_contains, body_contains, unread_only, or a date range.
+    Provide explicit Outlook EntryIDs/internet Message-IDs or select emails
+    with filters. Message-ID lookup is scoped by folder/account. For safety,
+    when entry_ids is omitted you must provide at least one real selector.
     """
     try:
         if not entry_ids.strip() and not _has_bulk_filter(
@@ -1938,7 +2125,7 @@ async def bulk_mark_as_unread(
                 "",
             ),
             process_function=_process_bulk_mark_batch,
-            process_args=(account, True),
+            process_args=(account, folder, True),
             initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
@@ -1961,9 +2148,9 @@ async def bulk_move_emails(
 ) -> str:
     """Move multiple emails to a destination folder.
 
-    Provide explicit EntryIDs or select emails with filters. For safety, when
-    entry_ids is omitted you must provide at least one real selector such as
-    sender, subject_contains, body_contains, unread_only, or a date range.
+    Provide explicit Outlook EntryIDs/internet Message-IDs or select emails
+    with filters. Message-ID lookup is scoped by source folder/account. For
+    safety, when entry_ids is omitted you must provide a real selector.
     """
     try:
         if not entry_ids.strip() and not _has_bulk_filter(
@@ -1993,7 +2180,7 @@ async def bulk_move_emails(
                 target_folder,
             ),
             process_function=_process_bulk_move_batch,
-            process_args=(account, target_folder),
+            process_args=(account, folder, target_folder),
             initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
@@ -3123,23 +3310,25 @@ async def delete_task(entry_id: str, account: str = "") -> str:
 # =====================================================================
 
 @mcp.tool()
-async def list_attachments(entry_id: str, account: str = "") -> str:
+async def list_attachments(
+    entry_id: str,
+    account: str = "",
+    folder: str = "inbox",
+) -> str:
     """List all attachments on an email or calendar event.
 
     Args:
-        entry_id: The EntryID of the email or event to check for attachments.
+        entry_id: The EntryID of an email/event, or an email Message-ID.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        folder: Folder containing the email when entry_id is a Message-ID.
+            Default "inbox".
 
     Returns:
         JSON array of attachment objects with index, filename, and size.
     """
-    def _list(outlook, namespace, entry_id, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+    def _list(outlook, namespace, entry_id, account, folder):
+        item = _resolve_outlook_item(namespace, entry_id, account, folder)
         results = []
         for i in range(item.Attachments.Count):
             att = item.Attachments.Item(i + 1)
@@ -3151,7 +3340,7 @@ async def list_attachments(entry_id: str, account: str = "") -> str:
         return json.dumps(results, indent=2, default=str)
 
     try:
-        return await bridge.call(_list, entry_id, account)
+        return await bridge.call(_list, entry_id, account, folder)
     except Exception as e:
         return _tool_error(e)
 
@@ -3162,29 +3351,36 @@ async def save_attachment(
     attachment_index: int = 1,
     save_directory: str = "",
     account: str = "",
+    folder: str = "inbox",
 ) -> str:
     """Save an attachment from an email or event to disk.
 
     Downloads the specified attachment to a local directory.
 
     Args:
-        entry_id: The EntryID of the email or event containing the attachment.
+        entry_id: The EntryID of an email/event, or an email Message-ID.
         attachment_index: Which attachment to save (1-based index). Default 1
             (first attachment). Use list_attachments to see available indices.
         save_directory: Directory to save the file to. Default: user's
             Downloads folder.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        folder: Folder containing the email when entry_id is a Message-ID.
+            Default "inbox".
 
     Returns:
         The full file path where the attachment was saved, or an error.
     """
-    def _save(outlook, namespace, entry_id, attachment_index, save_directory, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+    def _save(
+        outlook,
+        namespace,
+        entry_id,
+        attachment_index,
+        save_directory,
+        account,
+        folder,
+    ):
+        item = _resolve_outlook_item(namespace, entry_id, account, folder)
         if attachment_index < 1 or item.Attachments.Count < attachment_index:
             raise ValueError(
                 f"Only {item.Attachments.Count} attachment(s), "
@@ -3221,7 +3417,14 @@ async def save_attachment(
         }, indent=2, default=str)
 
     try:
-        return await bridge.call(_save, entry_id, attachment_index, save_directory, account)
+        return await bridge.call(
+            _save,
+            entry_id,
+            attachment_index,
+            save_directory,
+            account,
+            folder,
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -3263,6 +3466,7 @@ async def set_category(
     entry_id: str,
     categories: str,
     account: str = "",
+    folder: str = "inbox",
 ) -> str:
     """Set categories on an email, event, or task.
 
@@ -3270,22 +3474,20 @@ async def set_category(
     values for multiple categories.
 
     Args:
-        entry_id: The EntryID of the item to categorize.
+        entry_id: The EntryID of any item, or an email Message-ID.
         categories: Category name(s), comma-separated. Example:
             "Important" or "Work, Follow-up". Use an empty string to
             clear all categories.
         account: Optional. Account display name (or substring). Only needed
             if entry_id is ambiguous across stores.
+        folder: Folder containing the email when entry_id is a Message-ID.
+            Default "inbox".
 
     Returns:
         Confirmation with the item subject and applied categories.
     """
-    def _set(outlook, namespace, entry_id, categories, account):
-        if account:
-            store = _require_store(namespace, account)
-            item = namespace.GetItemFromID(entry_id, store.StoreID)
-        else:
-            item = namespace.GetItemFromID(entry_id)
+    def _set(outlook, namespace, entry_id, categories, account, folder):
+        item = _resolve_outlook_item(namespace, entry_id, account, folder)
         item.Categories = categories
         item.Save()
         return (
@@ -3294,7 +3496,13 @@ async def set_category(
         )
 
     try:
-        return await bridge.call(_set, entry_id, categories, account)
+        return await bridge.call(
+            _set,
+            entry_id,
+            categories,
+            account,
+            folder,
+        )
     except Exception as e:
         return _tool_error(e)
 

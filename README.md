@@ -206,6 +206,21 @@ explicitly supplied.
 
 List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `list_tasks`) accept an optional `include_body` parameter. When true, results include a ~300 char body preview, To/CC, and categories inline — eliminating the need for follow-up detail calls during triage.
 
+#### Stable email identity
+
+Every email summary/full result includes both Outlook's `entry_id` and:
+
+- `message_id`: the internet Message-ID, or `null` when Outlook does not expose it
+- `id_stable`: `true` when `message_id` is available
+
+Outlook EntryIDs are fast but change when a message moves. Email-targeting
+tools accept either a long hexadecimal EntryID beginning `00000000` or an
+internet Message-ID such as `<local@domain>`. Message-ID lookup is exact and
+scoped to the supplied `account` and `folder` (`inbox` by default), so pass the
+message's current folder after a move. Duplicate Message-IDs in one folder are
+reported as ambiguous rather than selected silently. Bulk `entry_ids` lists may
+contain either identifier format.
+
 ### Health and accounts (3 tools)
 
 | Tool | Description |
@@ -221,18 +236,18 @@ List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `lis
 | `send_email` | Send an email with To/CC/BCC, plain text or HTML body |
 | `create_draft` | Create a draft email in Drafts without sending (for user review) |
 | `list_emails` | List recent emails from any folder, with optional body preview |
-| `read_email` | Read full email content by entry ID or subject search |
+| `read_email` | Read full email content by EntryID, Message-ID, or subject search |
 | `search_emails` | Full-text search across subjects/bodies with optional sender filtering |
-| `reply_email` | Reply or reply-all, preserving the conversation thread |
-| `forward_email` | Forward an email with attachments to new recipients |
-| `mark_as_read` | Mark a specific email as read |
-| `mark_as_unread` | Mark a specific email as unread |
-| `move_email` | Move an email to Archive, Trash, or any folder |
+| `reply_email` | Reply or reply-all by EntryID or folder-scoped Message-ID |
+| `forward_email` | Forward an email by EntryID or folder-scoped Message-ID |
+| `mark_as_read` | Mark a specific email as read by EntryID or Message-ID |
+| `mark_as_unread` | Mark a specific email as unread by EntryID or Message-ID |
+| `move_email` | Move an email and return old/new EntryIDs plus stable Message-ID |
 | `list_folders` | Browse the complete folder hierarchy with item counts |
-| `bulk_mark_as_read` | Mark multiple emails as read in a single call |
-| `bulk_mark_as_unread` | Mark multiple emails as unread in a single call |
-| `bulk_move_emails` | Move multiple emails to a folder in a single call |
-| `bulk_read_emails` | Read full content of multiple emails in a single call |
+| `bulk_mark_as_read` | Mark multiple emails by mixed EntryID/Message-ID list or filters |
+| `bulk_mark_as_unread` | Mark multiple emails by mixed EntryID/Message-ID list or filters |
+| `bulk_move_emails` | Move multiple emails and retain stable identity in result rows |
+| `bulk_read_emails` | Read full content by mixed EntryID/Message-ID list or filters |
 
 ### Calendar (10 tools)
 
@@ -344,15 +359,15 @@ Example:
 
 | Tool | Description |
 |------|-------------|
-| `list_attachments` | List all attachments on an email or calendar event |
-| `save_attachment` | Download an attachment to a local directory |
+| `list_attachments` | List attachments by item EntryID or email Message-ID |
+| `save_attachment` | Download an attachment by item EntryID or email Message-ID |
 
 ### Categories (2 tools)
 
 | Tool | Description |
 |------|-------------|
 | `list_categories` | List all available color categories in Outlook |
-| `set_category` | Set or clear categories on any email, event, or task |
+| `set_category` | Set categories by item EntryID or email Message-ID |
 
 ### Rules (2 tools)
 

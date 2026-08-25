@@ -4,7 +4,8 @@ import time
 
 from outlook_desktop_mcp import server
 from outlook_desktop_mcp.operations import OperationManager
-from tests.fakes import Collection, FakeComError, FakeMailItem
+from outlook_desktop_mcp.utils.formatting import PR_INTERNET_MESSAGE_ID_UNICODE
+from tests.fakes import Collection, FakeComError, FakeMailItem, make_entry_id
 
 
 class FakeBridge:
@@ -54,6 +55,16 @@ class SequenceNamespace:
         return value
 
 
+class MappingNamespace(SequenceNamespace):
+    def __init__(self, items, store=None):
+        super().__init__(items, store=store)
+        self.items_by_id = {item.EntryID: item for item in items}
+
+    def GetItemFromID(self, entry_id, _store_id=None):
+        self.calls += 1
+        return self.items_by_id[entry_id]
+
+
 class SaveFails(FakeMailItem):
     def Save(self):
         raise FakeComError(0x80020009)
@@ -69,6 +80,7 @@ class MoveItem(FakeMailItem):
             self.new_entry_id,
             subject=self.Subject,
             received_time=self.ReceivedTime,
+            properties=self.PropertyAccessor.properties,
         )
 
 
@@ -146,16 +158,21 @@ def poll_operation(operation_id, timeout=5):
 
 
 def test_bulk_mark_refetches_once_and_echoes_fresh_identity(monkeypatch):
-    stale = SaveFails("id-1", subject="Stale subject")
-    fresh = FakeMailItem("id-1", subject="Fresh subject")
+    entry_id = make_entry_id()
+    message_id = "<bulk-refetch@example.com>"
+    properties = {PR_INTERNET_MESSAGE_ID_UNICODE: message_id}
+    stale = SaveFails(entry_id, subject="Stale subject", properties=properties)
+    fresh = FakeMailItem(entry_id, subject="Fresh subject", properties=properties)
     namespace = SequenceNamespace([stale, fresh])
     monkeypatch.setattr(server, "bridge", FakeBridge(namespace))
 
-    payload = json.loads(asyncio.run(server.bulk_mark_as_read(entry_ids="id-1")))
+    payload = json.loads(asyncio.run(server.bulk_mark_as_read(entry_ids=entry_id)))
     row = payload["results"][0]
 
     assert row["status"] == "ok"
-    assert row["id"] == "id-1"
+    assert row["id"] == entry_id
+    assert row["message_id"] == message_id
+    assert row["id_stable"] is True
     assert row["subject"] == "Fresh subject"
     assert row["received_time"]
     assert row["action"] == "marked_as_read"
@@ -170,15 +187,18 @@ def test_bulk_mark_refetches_once_and_echoes_fresh_identity(monkeypatch):
 
 
 def test_bulk_mark_reports_structured_error_after_retry(monkeypatch):
-    first = SaveFails("id-1")
-    second = SaveFails("id-1")
+    entry_id = make_entry_id()
+    first = SaveFails(entry_id)
+    second = SaveFails(entry_id)
     namespace = SequenceNamespace([first, second])
     monkeypatch.setattr(server, "bridge", FakeBridge(namespace))
 
-    payload = json.loads(asyncio.run(server.bulk_mark_as_read(entry_ids="id-1")))
+    payload = json.loads(asyncio.run(server.bulk_mark_as_read(entry_ids=entry_id)))
     row = payload["results"][0]
 
     assert row["status"] == "failed"
+    assert row["message_id"] is None
+    assert row["id_stable"] is False
     assert row["error"]["code"] == "mapi_exception"
     assert payload["summary"]["failed"] == 1
 
@@ -191,7 +211,7 @@ def test_bulk_move_missing_source_is_idempotent_skip(monkeypatch):
 
     payload = json.loads(asyncio.run(server.bulk_move_emails(
         "archive",
-        entry_ids="old-id",
+        entry_ids=make_entry_id(),
     )))
     row = payload["results"][0]
 
@@ -202,27 +222,38 @@ def test_bulk_move_missing_source_is_idempotent_skip(monkeypatch):
 
 
 def test_bulk_move_returns_old_and_new_entry_ids(monkeypatch):
-    item = MoveItem("old-id", new_entry_id="new-id")
+    old_entry_id = make_entry_id(1)
+    new_entry_id = make_entry_id(2)
+    message_id = "<bulk-move@example.com>"
+    item = MoveItem(
+        old_entry_id,
+        new_entry_id=new_entry_id,
+        properties={PR_INTERNET_MESSAGE_ID_UNICODE: message_id},
+    )
     store = FakeStore()
     namespace = SequenceNamespace([item], store=store)
     monkeypatch.setattr(server, "bridge", FakeBridge(namespace))
 
     payload = json.loads(asyncio.run(server.bulk_move_emails(
         "archive",
-        entry_ids="old-id",
+        entry_ids=old_entry_id,
     )))
     row = payload["results"][0]
 
     assert row["status"] == "ok"
-    assert row["id"] == "old-id"
-    assert row["entry_id"] == "old-id"
-    assert row["new_entry_id"] == "new-id"
+    assert row["id"] == old_entry_id
+    assert row["entry_id"] == old_entry_id
+    assert row["old_entry_id"] == old_entry_id
+    assert row["new_entry_id"] == new_entry_id
+    assert row["message_id"] == message_id
+    assert row["id_stable"] is True
 
 
 def test_bulk_move_reports_unconfirmed_when_old_id_disappears_after_error(
     monkeypatch,
 ):
-    item = MoveRaises("old-id")
+    old_entry_id = make_entry_id()
+    item = MoveRaises(old_entry_id)
     missing = FakeComError(0x8004010F)
     store = FakeStore()
     namespace = SequenceNamespace([item, item, missing], store=store)
@@ -230,7 +261,7 @@ def test_bulk_move_reports_unconfirmed_when_old_id_disappears_after_error(
 
     payload = json.loads(asyncio.run(server.bulk_move_emails(
         "archive",
-        entry_ids="old-id",
+        entry_ids=old_entry_id,
     )))
     row = payload["results"][0]
 
@@ -243,8 +274,18 @@ def test_short_budget_40_item_operation_polls_to_complete_in_ordered_batches(
     monkeypatch,
     tmp_path,
 ):
-    items = [SlowMailItem(f"id-{index:02}") for index in range(40)]
-    namespace = SequenceNamespace(items)
+    items = [
+        SlowMailItem(
+            make_entry_id(index + 1),
+            properties={
+                PR_INTERNET_MESSAGE_ID_UNICODE: (
+                    f"<chunk-{index:02}@example.com>"
+                )
+            },
+        )
+        for index in range(40)
+    ]
+    namespace = MappingNamespace(items)
     bridge = BatchingBridge(namespace)
     monkeypatch.setattr(server, "bridge", bridge)
     monkeypatch.setattr(
@@ -268,8 +309,12 @@ def test_short_budget_40_item_operation_polls_to_complete_in_ordered_batches(
     assert [row["id"] for row in completed["results"]] == [
         item.EntryID for item in items
     ]
+    assert [row["message_id"] for row in completed["results"]] == [
+        f"<chunk-{index:02}@example.com>" for index in range(40)
+    ]
+    assert all(row["id_stable"] is True for row in completed["results"])
     assert bridge.batches == [
-        [f"id-{index:02}" for index in range(offset, offset + 10)]
+        [make_entry_id(index + 1) for index in range(offset, offset + 10)]
         for offset in range(0, 40, 10)
     ]
 
@@ -278,7 +323,7 @@ def test_filter_selected_work_over_ten_uses_ordered_sub_batches(
     monkeypatch,
     tmp_path,
 ):
-    items = [FakeMailItem(f"id-{index:02}") for index in range(25)]
+    items = [FakeMailItem(make_entry_id(index + 1)) for index in range(25)]
     store = FilterStore(items)
     namespace = SequenceNamespace(items, store=store)
     bridge = BatchingBridge(namespace)
@@ -296,7 +341,7 @@ def test_filter_selected_work_over_ten_uses_ordered_sub_batches(
 
     assert payload["summary"]["ok"] == 25
     assert bridge.batches == [
-        [f"id-{index:02}" for index in range(0, 10)],
-        [f"id-{index:02}" for index in range(10, 20)],
-        [f"id-{index:02}" for index in range(20, 25)],
+        [make_entry_id(index + 1) for index in range(0, 10)],
+        [make_entry_id(index + 1) for index in range(10, 20)],
+        [make_entry_id(index + 1) for index in range(20, 25)],
     ]

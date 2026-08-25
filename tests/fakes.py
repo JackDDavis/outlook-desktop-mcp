@@ -18,6 +18,10 @@ class Collection:
         return iter(self.values)
 
 
+def make_entry_id(number=1):
+    return f"00000000{number:056X}"
+
+
 class FakePropertyAccessor:
     def __init__(self, properties=None):
         self.properties = dict(properties or {})
