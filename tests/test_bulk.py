@@ -1,7 +1,9 @@
 import asyncio
 import json
+import time
 
 from outlook_desktop_mcp import server
+from outlook_desktop_mcp.operations import OperationManager
 from tests.fakes import Collection, FakeComError, FakeMailItem
 
 
@@ -73,6 +75,74 @@ class MoveItem(FakeMailItem):
 class MoveRaises(FakeMailItem):
     def Move(self, _destination):
         raise FakeComError(0x80020009)
+
+
+class BatchingBridge(FakeBridge):
+    bulk_timeout_seconds = 5
+
+    def __init__(self, namespace):
+        super().__init__(namespace)
+        self.batches = []
+
+    async def call(self, function, *args, **kwargs):
+        request_name = kwargs.pop("request_name", "")
+        kwargs.pop("timeout_seconds", None)
+        if request_name.endswith("_batch"):
+            self.batches.append(list(args[0]))
+        return function(object(), self.namespace, *args, **kwargs)
+
+
+class SlowMailItem(FakeMailItem):
+    def Save(self):
+        time.sleep(0.005)
+        super().Save()
+
+
+class SortableCollection(Collection):
+    def Sort(self, *_args):
+        return None
+
+    def Restrict(self, *_args):
+        return self
+
+
+class FilterStore:
+    DisplayName = "Store"
+    StoreID = "store-1"
+
+    def __init__(self, items):
+        self.inbox = type(
+            "Folder",
+            (),
+            {
+                "Name": "Inbox",
+                "Folders": Collection(),
+                "Items": SortableCollection(items),
+            },
+        )()
+        self.root = type(
+            "Root",
+            (),
+            {"Folders": Collection([self.inbox])},
+        )()
+
+    def GetDefaultFolder(self, _folder_type):
+        return self.inbox
+
+    def GetRootFolder(self):
+        return self.root
+
+
+def poll_operation(operation_id, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        payload = json.loads(asyncio.run(
+            server.outlook_operation_status(operation_id)
+        ))
+        if payload["status"] != "in_progress":
+            return payload
+        time.sleep(0.01)
+    raise AssertionError("operation did not finish")
 
 
 def test_bulk_mark_refetches_once_and_echoes_fresh_identity(monkeypatch):
@@ -155,7 +225,7 @@ def test_bulk_move_reports_unconfirmed_when_old_id_disappears_after_error(
     item = MoveRaises("old-id")
     missing = FakeComError(0x8004010F)
     store = FakeStore()
-    namespace = SequenceNamespace([item, missing], store=store)
+    namespace = SequenceNamespace([item, item, missing], store=store)
     monkeypatch.setattr(server, "bridge", FakeBridge(namespace))
 
     payload = json.loads(asyncio.run(server.bulk_move_emails(
@@ -167,3 +237,66 @@ def test_bulk_move_reports_unconfirmed_when_old_id_disappears_after_error(
     assert row["status"] == "skipped"
     assert row["reason"] == "moved_or_gone_unconfirmed"
     assert row["error"]["code"] == "not_found"
+
+
+def test_short_budget_40_item_operation_polls_to_complete_in_ordered_batches(
+    monkeypatch,
+    tmp_path,
+):
+    items = [SlowMailItem(f"id-{index:02}") for index in range(40)]
+    namespace = SequenceNamespace(items)
+    bridge = BatchingBridge(namespace)
+    monkeypatch.setattr(server, "bridge", bridge)
+    monkeypatch.setattr(
+        server,
+        "operation_manager",
+        OperationManager(tmp_path, process_instance_id="test-process"),
+    )
+    monkeypatch.setenv("MCP_OP_BUDGET_SECONDS", "0.01")
+
+    initial = json.loads(asyncio.run(server.bulk_mark_as_read(
+        entry_ids=",".join(item.EntryID for item in items),
+        count=40,
+    )))
+
+    assert initial["status"] == "in_progress"
+    assert initial["remaining"] <= 40
+    completed = poll_operation(initial["operation_id"])
+    assert completed["status"] == "complete"
+    assert completed["remaining"] == 0
+    assert completed["summary"]["ok"] == 40
+    assert [row["id"] for row in completed["results"]] == [
+        item.EntryID for item in items
+    ]
+    assert bridge.batches == [
+        [f"id-{index:02}" for index in range(offset, offset + 10)]
+        for offset in range(0, 40, 10)
+    ]
+
+
+def test_filter_selected_work_over_ten_uses_ordered_sub_batches(
+    monkeypatch,
+    tmp_path,
+):
+    items = [FakeMailItem(f"id-{index:02}") for index in range(25)]
+    store = FilterStore(items)
+    namespace = SequenceNamespace(items, store=store)
+    bridge = BatchingBridge(namespace)
+    monkeypatch.setattr(server, "bridge", bridge)
+    monkeypatch.setattr(
+        server,
+        "operation_manager",
+        OperationManager(tmp_path, process_instance_id="test-process"),
+    )
+
+    payload = json.loads(asyncio.run(server.bulk_mark_as_read(
+        subject_contains="Subject",
+        count=25,
+    )))
+
+    assert payload["summary"]["ok"] == 25
+    assert bridge.batches == [
+        [f"id-{index:02}" for index in range(0, 10)],
+        [f"id-{index:02}" for index in range(10, 20)],
+        [f"id-{index:02}" for index in range(20, 25)],
+    ]

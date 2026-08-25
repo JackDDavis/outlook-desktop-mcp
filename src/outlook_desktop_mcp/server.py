@@ -7,6 +7,7 @@ Just run this on Windows with Outlook open and you have a full email MCP server.
 
 Entry point: python -m outlook_desktop_mcp.server
 """
+import asyncio
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 
 from outlook_desktop_mcp.com_bridge import OutlookBridge
+from outlook_desktop_mcp.operations import OperationManager
 from outlook_desktop_mcp.tools._folder_constants import (
     FOLDER_NAME_TO_ENUM,
     IMPORTANCE_NAMES,
@@ -184,11 +186,14 @@ mcp = OutlookFastMCP(
 )
 
 bridge = OutlookBridge()
+operation_manager = OperationManager(
+    process_instance_id=bridge.health_snapshot()["process_instance_id"],
+)
 
 
 def _operations_in_flight() -> int:
-    """Return active durable operation count once the operation manager is loaded."""
-    return 0
+    """Return the number of durable operations still running."""
+    return operation_manager.in_flight()
 
 
 # --- Helper: resolve store by account name ---
@@ -589,6 +594,286 @@ def _bulk_attempt(namespace, identifier: str, item, account: str, action):
             return None, identity, retry_error, "retry_failed"
 
 
+OPERATION_BATCH_SIZE = 10
+DEFAULT_OPERATION_BUDGET_SECONDS = 90.0
+
+
+def _operation_budget_seconds() -> float:
+    raw = os.environ.get("MCP_OP_BUDGET_SECONDS")
+    if raw is None:
+        return DEFAULT_OPERATION_BUDGET_SECONDS
+    try:
+        budget = float(raw)
+    except ValueError as error:
+        raise ValueError(
+            "MCP_OP_BUDGET_SECONDS must be a positive number"
+        ) from error
+    if budget <= 0:
+        raise ValueError("MCP_OP_BUDGET_SECONDS must be a positive number")
+    return budget
+
+
+def _initial_bulk_remaining(entry_ids: str, count: int) -> int:
+    limit = min(max(1, count), 100)
+    parsed_ids = _parse_entry_ids(entry_ids)
+    return min(len(parsed_ids), limit) if parsed_ids else limit
+
+
+async def _bulk_bridge_call(function, *args, request_name: str):
+    kwargs = {}
+    if hasattr(bridge, "bulk_timeout_seconds"):
+        kwargs = {
+            "timeout_seconds": bridge.bulk_timeout_seconds,
+            "request_name": request_name,
+        }
+    return await bridge.call(function, *args, **kwargs)
+
+
+def _prepare_bulk_email_operation(
+    outlook,
+    namespace,
+    entry_ids,
+    sender,
+    subject_contains,
+    body_contains,
+    folder,
+    unread_only,
+    start_date,
+    end_date,
+    count,
+    account,
+    target_folder,
+):
+    if target_folder:
+        store = _require_store(namespace, account)
+        if not _resolve_folder(namespace, target_folder, store):
+            raise ValueError(
+                f"Target folder '{target_folder}' not found. "
+                "Use list_folders to see available folders."
+            )
+
+    items, failures = _select_email_items(
+        namespace,
+        entry_ids=entry_ids,
+        sender=sender,
+        subject_contains=subject_contains,
+        body_contains=body_contains,
+        folder=folder,
+        unread_only=unread_only,
+        start_date=start_date,
+        end_date=end_date,
+        count=count,
+        account=account,
+    )
+    if target_folder:
+        for row in failures:
+            if (row.get("error") or {}).get("code") == "not_found":
+                row["status"] = "skipped"
+                row["reason"] = "not_found_in_source"
+                row["error"] = None
+    return [identifier for identifier, _item in items], failures
+
+
+def _bulk_resolution_failure(identifier: str, error: Exception) -> dict:
+    return {
+        "id": identifier,
+        "entry_id": identifier,
+        "subject": None,
+        "received_time": None,
+        "status": "failed",
+        "error": error_details(error),
+    }
+
+
+def _process_bulk_read_batch(outlook, namespace, identifiers, account):
+    results = []
+    for identifier in identifiers:
+        try:
+            item = _resolve_email_item(namespace, identifier, account)
+        except Exception as error:
+            results.append(_bulk_resolution_failure(identifier, error))
+            continue
+        email, identity, error, _attempt_state = _bulk_attempt(
+            namespace,
+            identifier,
+            item,
+            account,
+            format_email_full,
+        )
+        results.append({
+            **identity,
+            "status": "failed" if error else "ok",
+            "email": email,
+            "error": error_details(error) if error else None,
+        })
+    return results
+
+
+def _process_bulk_mark_batch(outlook, namespace, identifiers, account, unread):
+    action_name = "marked_as_unread" if unread else "marked_as_read"
+
+    def mark(item):
+        item.UnRead = unread
+        item.Save()
+        return {"action": action_name}
+
+    results = []
+    for identifier in identifiers:
+        try:
+            item = _resolve_email_item(namespace, identifier, account)
+        except Exception as error:
+            results.append(_bulk_resolution_failure(identifier, error))
+            continue
+        action, identity, error, _attempt_state = _bulk_attempt(
+            namespace,
+            identifier,
+            item,
+            account,
+            mark,
+        )
+        results.append({
+            **identity,
+            "status": "failed" if error else "ok",
+            **(action or {}),
+            "error": error_details(error) if error else None,
+        })
+    return results
+
+
+def _process_bulk_move_batch(
+    outlook,
+    namespace,
+    identifiers,
+    account,
+    target_folder,
+):
+    store = _require_store(namespace, account)
+    destination = _resolve_folder(namespace, target_folder, store)
+    if not destination:
+        raise ValueError(
+            f"Target folder '{target_folder}' not found. "
+            "Use list_folders to see available folders."
+        )
+
+    def move(item):
+        moved = item.Move(destination)
+        return {
+            "action": "moved",
+            "target_folder": target_folder,
+            "new_entry_id": getattr(moved, "EntryID", ""),
+        }
+
+    results = []
+    for identifier in identifiers:
+        try:
+            item = _resolve_email_item(namespace, identifier, account)
+        except Exception as error:
+            if error_details(error)["code"] == "not_found":
+                row = _bulk_resolution_failure(identifier, error)
+                row.update({
+                    "status": "skipped",
+                    "reason": "not_found_in_source",
+                    "error": None,
+                })
+                results.append(row)
+            else:
+                results.append(_bulk_resolution_failure(identifier, error))
+            continue
+        action, identity, error, attempt_state = _bulk_attempt(
+            namespace,
+            identifier,
+            item,
+            account,
+            move,
+        )
+        if (
+            error
+            and error_details(error)["code"] == "not_found"
+            and attempt_state == "refetch_failed"
+        ):
+            status = "skipped"
+            reason = "moved_or_gone_unconfirmed"
+            diagnostic = error_details(error)
+        else:
+            status = "failed" if error else "ok"
+            reason = None
+            diagnostic = error_details(error) if error else None
+        results.append({
+            **identity,
+            "status": status,
+            **(action or {}),
+            "reason": reason,
+            "error": diagnostic,
+        })
+    return results
+
+
+async def _execute_bulk_operation(
+    *,
+    kind: str,
+    selection_args: tuple,
+    process_function,
+    process_args: tuple,
+    initial_remaining: int,
+) -> str:
+    started = time.monotonic()
+    operation_id = operation_manager.create(
+        kind,
+        remaining=initial_remaining,
+    )
+
+    def runner(current_operation_id: str) -> None:
+        async def run_batches() -> None:
+            identifiers, failures = await _bulk_bridge_call(
+                _prepare_bulk_email_operation,
+                *selection_args,
+                request_name=f"{kind}_select",
+            )
+            matched_count = len(identifiers)
+            operation_manager.append_results(
+                current_operation_id,
+                failures,
+                matched_count=matched_count,
+                remaining=matched_count,
+            )
+            processed = 0
+            for offset in range(0, matched_count, OPERATION_BATCH_SIZE):
+                if operation_manager.should_stop():
+                    operation_manager.interrupt(current_operation_id)
+                    return
+                batch = identifiers[offset:offset + OPERATION_BATCH_SIZE]
+                rows = await _bulk_bridge_call(
+                    process_function,
+                    batch,
+                    *process_args,
+                    request_name=f"{kind}_batch",
+                )
+                processed += len(batch)
+                operation_manager.append_results(
+                    current_operation_id,
+                    rows,
+                    matched_count=matched_count,
+                    remaining=matched_count - processed,
+                )
+            operation_manager.complete(current_operation_id)
+
+        asyncio.run(run_batches())
+
+    operation_manager.start(operation_id, runner)
+    budget_remaining = max(
+        0,
+        _operation_budget_seconds() - (time.monotonic() - started),
+    )
+    payload = await asyncio.to_thread(
+        operation_manager.wait,
+        operation_id,
+        budget_remaining,
+    )
+    if payload["status"] == "complete":
+        return _bulk_payload(payload["results"], payload["matched_count"])
+    return json.dumps(payload, indent=2, default=str)
+
+
 # =====================================================================
 # TOOL: outlook_status
 # =====================================================================
@@ -685,6 +970,21 @@ async def outlook_status():
     return tool_result(
         payload,
         meta={"queue_wait_ms": 0, "execution_ms": status_elapsed_ms},
+    )
+
+
+@mcp.tool()
+async def outlook_operation_status(operation_id: str) -> str:
+    """Poll a bounded bulk email operation by its operation ID.
+
+    Returns accumulated standard bulk rows and one of: in_progress, complete,
+    error, interrupted, or not_found. Interrupted and unknown operations
+    include verification guidance and are never resumed automatically.
+    """
+    return json.dumps(
+        operation_manager.get(operation_id),
+        indent=2,
+        default=str,
     )
 
 
@@ -1513,47 +1813,25 @@ async def bulk_read_emails(
         JSON object with selection summary and a results array containing full
         email details or per-item errors.
     """
-    def _bulk_read(outlook, namespace, entry_ids, sender, subject_contains,
-                   body_contains, folder, unread_only, start_date, end_date,
-                   count, account):
-        try:
-            items, failures = _select_email_items(
-                namespace,
-                entry_ids=entry_ids,
-                sender=sender,
-                subject_contains=subject_contains,
-                body_contains=body_contains,
-                folder=folder,
-                unread_only=unread_only,
-                start_date=start_date,
-                end_date=end_date,
-                count=count,
-                account=account,
-            )
-        except Exception:
-            raise
-
-        results = list(failures)
-        for identifier, item in items:
-            email, identity, error, _attempt_state = _bulk_attempt(
-                namespace,
-                identifier,
-                item,
-                account,
-                format_email_full,
-            )
-            results.append({
-                **identity,
-                "status": "failed" if error else "ok",
-                "email": email,
-                "error": error_details(error) if error else None,
-            })
-        return _bulk_payload(results, len(items))
-
     try:
-        return await bridge.call(
-            _bulk_read, entry_ids, sender, subject_contains, body_contains,
-            folder, unread_only, start_date, end_date, count, account,
+        return await _execute_bulk_operation(
+            kind="bulk_read_emails",
+            selection_args=(
+                entry_ids,
+                sender,
+                subject_contains,
+                body_contains,
+                folder,
+                unread_only,
+                start_date,
+                end_date,
+                count,
+                account,
+                "",
+            ),
+            process_function=_process_bulk_read_batch,
+            process_args=(account,),
+            initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
         return _tool_error(e)
@@ -1578,59 +1856,36 @@ async def bulk_mark_as_read(
     entry_ids is omitted you must provide at least one real selector such as
     sender, subject_contains, body_contains, unread_only, or a date range.
     """
-    def _bulk_mark(outlook, namespace, entry_ids, sender, subject_contains,
-                   body_contains, folder, unread_only, start_date, end_date,
-                   count, account):
+    try:
         if not entry_ids.strip() and not _has_bulk_filter(
-            sender, subject_contains, body_contains, unread_only, start_date, end_date
+            sender,
+            subject_contains,
+            body_contains,
+            unread_only,
+            start_date,
+            end_date,
         ):
             raise ValueError(
                 "Provide entry_ids or at least one filter for bulk_mark_as_read."
             )
-
-        try:
-            items, failures = _select_email_items(
-                namespace,
-                entry_ids=entry_ids,
-                sender=sender,
-                subject_contains=subject_contains,
-                body_contains=body_contains,
-                folder=folder,
-                unread_only=unread_only,
-                start_date=start_date,
-                end_date=end_date,
-                count=count,
-                account=account,
-            )
-        except Exception:
-            raise
-
-        def mark(item):
-            item.UnRead = False
-            item.Save()
-            return {"action": "marked_as_read"}
-
-        results = list(failures)
-        for identifier, item in items:
-            action, identity, error, _attempt_state = _bulk_attempt(
-                namespace,
-                identifier,
-                item,
+        return await _execute_bulk_operation(
+            kind="bulk_mark_as_read",
+            selection_args=(
+                entry_ids,
+                sender,
+                subject_contains,
+                body_contains,
+                folder,
+                unread_only,
+                start_date,
+                end_date,
+                count,
                 account,
-                mark,
-            )
-            results.append({
-                **identity,
-                "status": "failed" if error else "ok",
-                **(action or {}),
-                "error": error_details(error) if error else None,
-            })
-        return _bulk_payload(results, len(items))
-
-    try:
-        return await bridge.call(
-            _bulk_mark, entry_ids, sender, subject_contains, body_contains,
-            folder, unread_only, start_date, end_date, count, account,
+                "",
+            ),
+            process_function=_process_bulk_mark_batch,
+            process_args=(account, False),
+            initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
         return _tool_error(e)
@@ -1655,59 +1910,36 @@ async def bulk_mark_as_unread(
     entry_ids is omitted you must provide at least one real selector such as
     sender, subject_contains, body_contains, unread_only, or a date range.
     """
-    def _bulk_mark(outlook, namespace, entry_ids, sender, subject_contains,
-                   body_contains, folder, unread_only, start_date, end_date,
-                   count, account):
+    try:
         if not entry_ids.strip() and not _has_bulk_filter(
-            sender, subject_contains, body_contains, unread_only, start_date, end_date
+            sender,
+            subject_contains,
+            body_contains,
+            unread_only,
+            start_date,
+            end_date,
         ):
             raise ValueError(
                 "Provide entry_ids or at least one filter for bulk_mark_as_unread."
             )
-
-        try:
-            items, failures = _select_email_items(
-                namespace,
-                entry_ids=entry_ids,
-                sender=sender,
-                subject_contains=subject_contains,
-                body_contains=body_contains,
-                folder=folder,
-                unread_only=unread_only,
-                start_date=start_date,
-                end_date=end_date,
-                count=count,
-                account=account,
-            )
-        except Exception:
-            raise
-
-        def mark(item):
-            item.UnRead = True
-            item.Save()
-            return {"action": "marked_as_unread"}
-
-        results = list(failures)
-        for identifier, item in items:
-            action, identity, error, _attempt_state = _bulk_attempt(
-                namespace,
-                identifier,
-                item,
+        return await _execute_bulk_operation(
+            kind="bulk_mark_as_unread",
+            selection_args=(
+                entry_ids,
+                sender,
+                subject_contains,
+                body_contains,
+                folder,
+                unread_only,
+                start_date,
+                end_date,
+                count,
                 account,
-                mark,
-            )
-            results.append({
-                **identity,
-                "status": "failed" if error else "ok",
-                **(action or {}),
-                "error": error_details(error) if error else None,
-            })
-        return _bulk_payload(results, len(items))
-
-    try:
-        return await bridge.call(
-            _bulk_mark, entry_ids, sender, subject_contains, body_contains,
-            folder, unread_only, start_date, end_date, count, account,
+                "",
+            ),
+            process_function=_process_bulk_mark_batch,
+            process_args=(account, True),
+            initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
         return _tool_error(e)
@@ -1733,89 +1965,36 @@ async def bulk_move_emails(
     entry_ids is omitted you must provide at least one real selector such as
     sender, subject_contains, body_contains, unread_only, or a date range.
     """
-    def _bulk_move(outlook, namespace, target_folder, entry_ids, sender,
-                   subject_contains, body_contains, folder, unread_only,
-                   start_date, end_date, count, account):
+    try:
         if not entry_ids.strip() and not _has_bulk_filter(
-            sender, subject_contains, body_contains, unread_only, start_date, end_date
+            sender,
+            subject_contains,
+            body_contains,
+            unread_only,
+            start_date,
+            end_date,
         ):
             raise ValueError(
                 "Provide entry_ids or at least one filter for bulk_move_emails."
             )
-
-        store = _require_store(namespace, account)
-        dest = _resolve_folder(namespace, target_folder, store)
-        if not dest:
-            raise ValueError(
-                f"Target folder '{target_folder}' not found. "
-                "Use list_folders to see available folders."
-            )
-
-        try:
-            items, failures = _select_email_items(
-                namespace,
-                entry_ids=entry_ids,
-                sender=sender,
-                subject_contains=subject_contains,
-                body_contains=body_contains,
-                folder=folder,
-                unread_only=unread_only,
-                start_date=start_date,
-                end_date=end_date,
-                count=count,
-                account=account,
-            )
-        except Exception:
-            raise
-
-        for row in failures:
-            if (row.get("error") or {}).get("code") == "not_found":
-                row["status"] = "skipped"
-                row["reason"] = "not_found_in_source"
-                row["error"] = None
-
-        def move(item):
-            moved = item.Move(dest)
-            return {
-                "action": "moved",
-                "target_folder": target_folder,
-                "new_entry_id": getattr(moved, "EntryID", ""),
-            }
-
-        results = list(failures)
-        for identifier, item in items:
-            action, identity, error, attempt_state = _bulk_attempt(
-                namespace,
-                identifier,
-                item,
+        return await _execute_bulk_operation(
+            kind="bulk_move_emails",
+            selection_args=(
+                entry_ids,
+                sender,
+                subject_contains,
+                body_contains,
+                folder,
+                unread_only,
+                start_date,
+                end_date,
+                count,
                 account,
-                move,
-            )
-            if (
-                error
-                and error_details(error)["code"] == "not_found"
-                and attempt_state == "refetch_failed"
-            ):
-                status = "skipped"
-                reason = "moved_or_gone_unconfirmed"
-                diagnostic = error_details(error)
-            else:
-                status = "failed" if error else "ok"
-                reason = None
-                diagnostic = error_details(error) if error else None
-            results.append({
-                **identity,
-                "status": status,
-                **(action or {}),
-                "reason": reason,
-                "error": diagnostic,
-            })
-        return _bulk_payload(results, len(items))
-
-    try:
-        return await bridge.call(
-            _bulk_move, target_folder, entry_ids, sender, subject_contains,
-            body_contains, folder, unread_only, start_date, end_date, count, account,
+                target_folder,
+            ),
+            process_function=_process_bulk_move_batch,
+            process_args=(account, target_folder),
+            initial_remaining=_initial_bulk_remaining(entry_ids, count),
         )
     except Exception as e:
         return _tool_error(e)
@@ -3277,12 +3456,14 @@ def main():
         try:
             mcp.run(transport="sse")
         finally:
+            operation_manager.shutdown()
             bridge.stop()
     else:
         logger.info("COM bridge ready. Starting MCP stdio transport...")
         try:
             mcp.run(transport="stdio")
         finally:
+            operation_manager.shutdown()
             bridge.stop()
 
 

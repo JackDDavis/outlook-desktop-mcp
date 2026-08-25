@@ -70,6 +70,11 @@ def test_status_returns_immediately_without_queueing_behind_busy_work(monkeypatc
     bridge = BusyStatusBridge()
     monkeypatch.setattr(server, "bridge", bridge)
     monkeypatch.setattr(server, "_outlook_process_running", lambda: True)
+    monkeypatch.setattr(
+        server.operation_manager,
+        "in_flight",
+        lambda: 2,
+    )
 
     started = time.monotonic()
     result = asyncio.run(server.outlook_status())
@@ -80,6 +85,7 @@ def test_status_returns_immediately_without_queueing_behind_busy_work(monkeypatc
     assert payload["com_probe"] == "skipped_busy"
     assert payload["com_state"] == "busy"
     assert payload["active_request"]["name"] == "bulk_move"
+    assert payload["operations_in_flight"] == 2
     assert bridge.probe_calls == 1
 
 

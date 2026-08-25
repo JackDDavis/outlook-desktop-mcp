@@ -206,11 +206,12 @@ explicitly supplied.
 
 List tools (`list_emails`, `search_emails`, `list_events`, `search_events`, `list_tasks`) accept an optional `include_body` parameter. When true, results include a ~300 char body preview, To/CC, and categories inline — eliminating the need for follow-up detail calls during triage.
 
-### Health and accounts (2 tools)
+### Health and accounts (3 tools)
 
 | Tool | Description |
 |------|-------------|
 | `outlook_status` | Return immediate Outlook process, COM bridge, queue, active-request, and cached per-account health |
+| `outlook_operation_status` | Poll an in-progress bulk email operation and retrieve accumulated result rows |
 | `list_accounts` | List all accounts configured in Outlook with display name and email |
 
 ### Email (15 tools)
@@ -301,6 +302,21 @@ item is already gone returns `skipped` with `not_found_in_source`.
 If Outlook throws after a move may already have completed and the old ID can
 no longer be resolved, the row reports `moved_or_gone_unconfirmed`; verify the
 destination before retrying.
+
+Bulk email COM work runs in ordered sub-batches of 10. The caller waits up to
+`MCP_OP_BUDGET_SECONDS` (default 90 seconds). Work that finishes within that
+budget returns the normal synchronous bulk response. Otherwise the response
+has `status: "in_progress"`, an `operation_id`, accumulated standard rows,
+`summary`, and `remaining`; poll `outlook_operation_status(operation_id)` until
+it reports `complete`, `error`, or `interrupted`.
+
+Operation snapshots are atomically stored for 72 hours under
+`%LOCALAPPDATA%\outlook-desktop-mcp\operations`. The server never resumes an
+uncertain mutation after restart. A non-terminal snapshot from a previous
+process becomes `interrupted` with its last proven rows and guidance to verify
+the folder before safely re-running. Unknown, expired, or unreadable operation
+IDs report `not_found` with state-verification guidance. `outlook_status`
+reports the current `operations_in_flight` count.
 
 Example:
 

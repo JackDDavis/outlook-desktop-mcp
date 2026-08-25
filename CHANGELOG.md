@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
   and bounded client-side fallback on IMAP/POP accounts
 - Standard bulk result rows with requested ID, subject, received time, status,
   structured error, and aggregate ok/failed/skipped summary
+- Pollable bounded bulk operations via `outlook_operation_status`, with atomic
+  72-hour snapshots and interrupted-restart recovery guidance
 
 ### Changed
 - COM requests now have configurable 30-second single-call and 90-second bulk
@@ -26,6 +28,10 @@ All notable changes to this project will be documented in this file.
   client-side scan window was truncated
 - Bulk item failures are re-fetched from Outlook and retried once; repeated
   moves of items already absent from the source report idempotent skips
+- Bulk email COM work now runs in ordered sub-batches of 10 and returns an
+  `in_progress` operation when the configurable `MCP_OP_BUDGET_SECONDS`
+  caller budget is exceeded
+- `outlook_status` now reports `operations_in_flight`
 - Package version bumped to 0.5.0
 
 ## [0.4.0] — 2026-08-11
