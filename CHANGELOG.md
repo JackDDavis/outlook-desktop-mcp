@@ -48,6 +48,8 @@ All notable changes to this project will be documented in this file.
   queue/execution metadata when returned through MCP
 - README tool count corrected to 40 and reliability acceptance commands
   documented
+- HTTP/SSE transport now binds while Outlook COM initializes, so the
+  Outlook-start automation cannot leave a running but unreachable service
 
 ## [0.4.0] — 2026-08-11
 

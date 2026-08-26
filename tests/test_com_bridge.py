@@ -43,6 +43,22 @@ def test_start_reports_configured_timeout():
         bridge.start(timeout=0.01)
 
 
+def test_start_can_return_before_outlook_is_ready():
+    bridge = OutlookBridge()
+    release = threading.Event()
+    bridge._com_thread_main = lambda: release.wait(1)
+
+    started = time.monotonic()
+    try:
+        bridge.start(wait_until_ready=False)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        bridge.stop()
+
+    assert elapsed < 0.05
+
+
 def test_parallel_calls_are_serialized_with_queue_metrics(monkeypatch):
     bridge = start_fake_bridge(monkeypatch)
 
@@ -231,4 +247,17 @@ def test_timeout_on_stopped_bridge_does_not_leave_pending_request():
 
     asyncio.run(run_call())
 
+    assert bridge.health_snapshot()["queue_depth"] == 0
+
+
+def test_call_fails_immediately_after_bridge_initialization_error():
+    bridge = OutlookBridge()
+    bridge._thread = threading.Thread()
+    bridge._init_error = RuntimeError("COM initialization failed")
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="COM initialization failed"):
+        asyncio.run(bridge.call(lambda _outlook, _namespace: None))
+
+    assert time.monotonic() - started < 0.05
     assert bridge.health_snapshot()["queue_depth"] == 0

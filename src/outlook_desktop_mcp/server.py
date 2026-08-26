@@ -3655,12 +3655,15 @@ def main():
         logger.info("Denied %d tool(s): %s", len(denied), ", ".join(denied))
 
     logger.info("Starting Outlook Desktop MCP server...")
-    bridge.start()
+    bridge.start(wait_until_ready=not args.http)
 
     if args.http:
         mcp.settings.host = args.host
         mcp.settings.port = args.port
-        logger.info("COM bridge ready. Starting MCP SSE transport on port %d...", args.port)
+        logger.info(
+            "Starting MCP SSE transport on port %d while Outlook COM initializes...",
+            args.port,
+        )
         try:
             mcp.run(transport="sse")
         finally:

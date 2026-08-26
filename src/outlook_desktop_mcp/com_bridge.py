@@ -126,14 +126,16 @@ class OutlookBridge:
             DEFAULT_BULK_TIMEOUT_SECONDS,
         )
 
-    def start(self, timeout: float = 60):
-        """Start the COM thread. Call once at server startup."""
+    def start(self, timeout: float = 60, *, wait_until_ready: bool = True):
+        """Start the COM thread, optionally without blocking server startup."""
         self._thread = threading.Thread(
             target=self._com_thread_main,
             daemon=True,
             name="outlook-com",
         )
         self._thread.start()
+        if not wait_until_ready:
+            return
         if not self._ready.wait(timeout=timeout):
             if self._init_error:
                 raise self._init_error
@@ -280,9 +282,16 @@ class OutlookBridge:
 
     def _enqueue(self, request: BridgeRequest, *, only_if_idle: bool = False) -> bool:
         with self._state_lock:
+            if not only_if_idle:
+                if self._init_error is not None:
+                    raise self._init_error
+                if self._thread is not None and not self._thread.is_alive():
+                    raise RuntimeError("Outlook COM bridge is not running")
             if only_if_idle and (
                 not self._thread
                 or not self._thread.is_alive()
+                or not self._ready.is_set()
+                or self._init_error is not None
                 or self._active_request is not None
                 or self._pending_count > 0
             ):
