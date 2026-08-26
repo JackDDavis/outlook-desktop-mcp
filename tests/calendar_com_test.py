@@ -9,6 +9,8 @@ Run: .venv\\Scripts\\python tests\\calendar_com_test.py
 import sys
 from datetime import datetime, timedelta
 
+from self_send import self_address, send_allowed
+
 
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
@@ -126,7 +128,14 @@ def test_create_appointment(outlook):
 
 
 def test_create_meeting(outlook):
-    """Test 4: Create a meeting with an attendee and send the invite."""
+    """Test 4: Create a meeting addressed to self and send the invite."""
+    if not send_allowed():
+        log("  SKIP: live sending requires explicit approval (set OUTLOOK_MCP_ALLOW_SEND=1)")
+        return
+    attendee = self_address(outlook)
+    if not attendee:
+        log("  SKIP: self address unavailable; live tests never send to external addresses")
+        return
     appt = outlook.CreateItem(1)
     start = datetime.now() + timedelta(days=4, hours=3)
     end = start + timedelta(minutes=30)
@@ -138,12 +147,12 @@ def test_create_meeting(outlook):
     appt.Body = "Automated meeting test from calendar COM validation."
     appt.MeetingStatus = 1  # olMeeting
 
-    recipient = appt.Recipients.Add("user@example.com")
+    recipient = appt.Recipients.Add(attendee)
     recipient.Type = 1  # olRequired
     appt.Recipients.ResolveAll()
 
     appt.Send()
-    log(f"  Meeting sent: '{appt.Subject}' to user@example.com")
+    log(f"  Meeting sent to self ({attendee}): '{appt.Subject}'")
 
 
 def test_update_event(namespace):

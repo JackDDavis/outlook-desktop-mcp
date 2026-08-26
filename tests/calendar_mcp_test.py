@@ -10,6 +10,7 @@ import asyncio
 import logging
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from self_send import self_address_via_mcp, send_allowed
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
 
@@ -122,25 +123,36 @@ async def run_tests():
             except Exception as e:
                 log(f"  FAIL: {e}")
 
-            # ----- Test 5: create_meeting -----
+            # ----- Test 5: create_meeting (self attendee only) -----
             total += 1
             log("\n--- Test 5: create_meeting ---")
             try:
-                start = (datetime.now() + timedelta(days=4, hours=3))
-                end = start + timedelta(minutes=30)
-                result = await session.call_tool("create_meeting", {
-                    "subject": "MCP Calendar Meeting Test",
-                    "start": start.strftime("%Y-%m-%d %H:%M"),
-                    "end": end.strftime("%Y-%m-%d %H:%M"),
-                    "required_attendees": "user@example.com",
-                    "location": "Virtual via MCP",
-                    "body": "Meeting created through MCP calendar tools.",
-                })
-                content = result.content[0].text
-                log(f"  Result: {content}")
-                assert "sent" in content.lower() or "created" in content.lower()
-                passed += 1
-                log("  PASS")
+                if not send_allowed():
+                    log("  SKIP: live sending requires explicit approval (set OUTLOOK_MCP_ALLOW_SEND=1)")
+                    passed += 1
+                    log("  PASS (skipped)")
+                else:
+                    self_addr = await self_address_via_mcp(session)
+                    if not self_addr:
+                        log("  SKIP: self address unavailable; live tests never send to external addresses")
+                        passed += 1
+                        log("  PASS (skipped)")
+                    else:
+                        start = (datetime.now() + timedelta(days=4, hours=3))
+                        end = start + timedelta(minutes=30)
+                        result = await session.call_tool("create_meeting", {
+                            "subject": "MCP Calendar Meeting Test",
+                            "start": start.strftime("%Y-%m-%d %H:%M"),
+                            "end": end.strftime("%Y-%m-%d %H:%M"),
+                            "required_attendees": self_addr,
+                            "location": "Virtual via MCP",
+                            "body": "Meeting created through MCP calendar tools (self-attendee).",
+                        })
+                        content = result.content[0].text
+                        log(f"  Result: {content}")
+                        assert "sent" in content.lower() or "created" in content.lower()
+                        passed += 1
+                        log(f"  PASS (attendee: {self_addr})")
             except Exception as e:
                 log(f"  FAIL: {e}")
 

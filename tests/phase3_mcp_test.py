@@ -12,6 +12,7 @@ import logging
 
 # Ensure our package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from self_send import self_address_via_mcp, send_allowed
 
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
@@ -134,20 +135,31 @@ async def run_tests():
             except Exception as e:
                 log(f"  FAIL: {e}")
 
-            # ----- Test 6: send_email -----
+            # ----- Test 6: send_email (self only; never external addresses) -----
             total += 1
             log("\n--- Test 6: send_email ---")
             try:
-                result = await session.call_tool("send_email", {
-                    "to": "user@example.com",
-                    "subject": "Outlook Desktop MCP - Phase 3 MCP Test",
-                    "body": "Sent through the MCP server via stdio. If you see this, the MCP layer works!",
-                })
-                content = result.content[0].text
-                log(f"  Result: {content}")
-                assert "sent" in content.lower()
-                passed += 1
-                log("  PASS")
+                if not send_allowed():
+                    log("  SKIP: live sending requires explicit approval (set OUTLOOK_MCP_ALLOW_SEND=1)")
+                    passed += 1
+                    log("  PASS (skipped)")
+                else:
+                    self_addr = await self_address_via_mcp(session)
+                    if not self_addr:
+                        log("  SKIP: self address unavailable; live tests never send to external addresses")
+                        passed += 1
+                        log("  PASS (skipped)")
+                    else:
+                        result = await session.call_tool("send_email", {
+                            "to": self_addr,
+                            "subject": "Outlook Desktop MCP - Phase 3 MCP Test",
+                            "body": "Self-test sent through the MCP server via stdio. If you see this in your own mailbox, the MCP layer works!",
+                        })
+                        content = result.content[0].text
+                        log(f"  Result: {content}")
+                        assert "sent" in content.lower()
+                        passed += 1
+                        log(f"  PASS (to: {self_addr})")
             except Exception as e:
                 log(f"  FAIL: {e}")
 

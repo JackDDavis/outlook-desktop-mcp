@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Live validation tests (`phase1_com_test`, `phase3_mcp_test`,
+  `calendar_com_test`, `calendar_mcp_test`) are read-only by default: send
+  and meeting-invite steps require explicit opt-in (`OUTLOOK_MCP_ALLOW_SEND`)
+  plus user approval, and send only to the profile's own address (derived
+  at runtime, `OUTLOOK_MCP_SELF_SEND` override); they skip instead of using
+  placeholder recipients such as `user@example.com`
+
 ### Added
 - `outlook_status` for queue-independent Outlook process, COM bridge, account,
   and active-request diagnostics

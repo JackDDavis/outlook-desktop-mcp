@@ -9,6 +9,8 @@ Run: .venv\\Scripts\\python tests\\phase1_com_test.py
 import sys
 import time
 
+from self_send import self_address, send_allowed
+
 def log(msg):
     print(msg, file=sys.stderr)
 
@@ -69,17 +71,24 @@ def test_filter_unread(namespace):
 
 
 def test_send_email(outlook):
-    """Test 5: Create and send a test email to self."""
+    """Test 5: Create and send a test email to self (approval-gated)."""
+    if not send_allowed():
+        log("  SKIP: live sending requires explicit approval (set OUTLOOK_MCP_ALLOW_SEND=1)")
+        return
+    recipient = self_address(outlook)
+    if not recipient:
+        log("  SKIP: self address unavailable; live tests never send to external addresses")
+        return
     mail = outlook.CreateItem(0)  # 0 = olMailItem
-    mail.To = "user@example.com"
+    mail.To = recipient
     mail.Subject = "Outlook Desktop MCP - COM Test"
     mail.Body = (
-        "This is an automated test from the Outlook Desktop MCP COM validation.\n"
+        "This is an automated self-test from the Outlook Desktop MCP COM validation.\n"
         f"Sent at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        "\nIf you received this, COM send_email works."
+        "\nIf you received this in your own mailbox, COM send_email works."
     )
     mail.Send()
-    log("  Email sent to user@example.com")
+    log(f"  Email sent to self ({recipient})")
 
 
 def test_mark_read_unread(namespace):

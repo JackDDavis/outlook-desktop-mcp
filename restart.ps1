@@ -85,7 +85,7 @@ if ($exitCode -eq 0) {
     Write-Host ""
     Write-Host "=== Next steps ===" -ForegroundColor Cyan
     Write-Host "  Claude Code : run /mcp to reconnect the MCP server" -ForegroundColor White
-    Write-Host "  OpenClaw    : SSE server is running on port 3721 — restart the agent or reconnect" -ForegroundColor White
+    Write-Host "  OpenClaw    : SSE server is running on port 3721 -- restart the agent or reconnect" -ForegroundColor White
 } else {
     Write-Host "  COM smoke test FAILED (exit $exitCode)." -ForegroundColor Red
     Write-Host $testOutput
