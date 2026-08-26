@@ -51,6 +51,6 @@ python_files = ["test_*.py"]
 addopts = "-m 'not live_outlook'"
 markers = [
     "acceptance: hermetic reliability acceptance coverage",
-    "reliability_criterion(name): one of the eight v0.5.0 acceptance criteria",
+    "reliability_criterion(name): one of the nine v0.5.0 acceptance criteria",
     "live_outlook: opt-in tests that use a real Windows Outlook profile",
 ]

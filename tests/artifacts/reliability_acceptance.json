@@ -31,6 +31,10 @@
     "criterion_8": {
       "description": "idempotent move rerun and restart interruption",
       "passed": true
+    },
+    "criterion_9": {
+      "description": "mail subject and body text sanitization",
+      "passed": true
     }
   },
   "passed": true,

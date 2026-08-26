@@ -355,6 +355,7 @@ def test_item_targeting_tools_accept_message_ids_and_keep_generic_entry_ids(
     message_id = "<actions@example.com>"
     mail = ActionMail(
         make_entry_id(1),
+        subject="\u200bAction\u034f subject",
         properties={PR_INTERNET_MESSAGE_ID_UNICODE: message_id},
     )
     generic = type(
@@ -393,5 +394,8 @@ def test_item_targeting_tools_accept_message_ids_and_keep_generic_entry_ids(
     assert attachments[0]["filename"] == "report.txt"
     assert Path(saved["path"]).read_text(encoding="utf-8") == "content"
     assert "Follow-up" in categorized
+    assert "Action subject" in categorized
+    assert "\u200b" not in categorized
+    assert "\u034f" not in categorized
     assert generic_attachments[0]["filename"] == "report.txt"
     assert namespace.entry_calls == [(generic.EntryID, None)]

@@ -1,5 +1,6 @@
 """Helpers for extracting and formatting Outlook item data."""
 import re
+import unicodedata
 
 from outlook_desktop_mcp.tools._folder_constants import (
     BUSY_STATUS_NAMES,
@@ -15,6 +16,29 @@ PR_INTERNET_MESSAGE_ID_UNICODE = (
 PR_INTERNET_MESSAGE_ID_ANSI = (
     "http://schemas.microsoft.com/mapi/proptag/0x1035001E"
 )
+_UNICODE_SPACES = {
+    "\u00a0",
+    "\u1680",
+    *map(chr, range(0x2000, 0x200B)),
+    "\u202f",
+    "\u205f",
+}
+
+
+def sanitize_body_text(text: str) -> str:
+    """Remove invisible formatting junk while preserving readable mail text."""
+    result = []
+    for character in text:
+        if character == "\u034f" or unicodedata.category(character) == "Cf":
+            continue
+        result.append(" " if character in _UNICODE_SPACES else character)
+    return "".join(result)
+
+
+def _sanitize_body_preview(text: str, max_length: int = 300) -> str:
+    sanitized = sanitize_body_text(text)
+    collapsed = re.sub(r"[ \t]+", " ", sanitized)
+    return truncate(collapsed, max_length)
 
 
 def truncate(text: str, max_length: int = 2000) -> str:
@@ -58,7 +82,7 @@ def format_email_summary(item, include_body: bool = False) -> dict:
     """Extract key fields from an Outlook MailItem into a dict."""
     result = {
         "entry_id": item.EntryID,
-        "subject": item.Subject or "(no subject)",
+        "subject": sanitize_body_text(item.Subject or "") or "(no subject)",
         "sender": getattr(item, "SenderEmailAddress", "unknown"),
         "sender_name": getattr(item, "SenderName", "unknown"),
         "received_time": str(item.ReceivedTime),
@@ -70,7 +94,7 @@ def format_email_summary(item, include_body: bool = False) -> dict:
     if include_body:
         result["to"] = item.To or ""
         result["cc"] = item.CC or ""
-        result["body_preview"] = truncate(item.Body or "", 300)
+        result["body_preview"] = _sanitize_body_preview(item.Body or "")
     return result
 
 
@@ -79,7 +103,7 @@ def format_email_full(item, body_max_length: int = 5000) -> dict:
     result = format_email_summary(item)
     result["to"] = item.To or ""
     result["cc"] = item.CC or ""
-    result["body"] = truncate(item.Body or "", body_max_length)
+    result["body"] = truncate(sanitize_body_text(item.Body or ""), body_max_length)
     return result
 
 

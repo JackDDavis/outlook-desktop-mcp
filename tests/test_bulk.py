@@ -186,6 +186,16 @@ def test_bulk_mark_refetches_once_and_echoes_fresh_identity(monkeypatch):
     assert namespace.calls == 2
 
 
+def test_bulk_rows_sanitize_mail_subject(monkeypatch):
+    entry_id = make_entry_id()
+    item = FakeMailItem(entry_id, subject="\u200bSale\u034f\u2007today")
+    monkeypatch.setattr(server, "bridge", FakeBridge(SequenceNamespace([item])))
+
+    payload = json.loads(asyncio.run(server.bulk_mark_as_read(entry_ids=entry_id)))
+
+    assert payload["results"][0]["subject"] == "Sale today"
+
+
 def test_bulk_mark_reports_structured_error_after_retry(monkeypatch):
     entry_id = make_entry_id()
     first = SaveFails(entry_id)

@@ -53,6 +53,7 @@ from outlook_desktop_mcp.utils.formatting import (
     format_message_identity,
     format_task_full,
     format_task_summary,
+    sanitize_body_text,
 )
 from outlook_desktop_mcp.utils.responses import tool_result
 
@@ -636,7 +637,9 @@ def _select_email_items(namespace, entry_ids: str = "", sender: str = "",
                     "id": getattr(item, "EntryID", ""),
                     "entry_id": getattr(item, "EntryID", ""),
                     **format_message_identity(item),
-                    "subject": getattr(item, "Subject", None),
+                    "subject": sanitize_body_text(
+                        getattr(item, "Subject", "") or ""
+                    ) or None,
                     "received_time": str(getattr(item, "ReceivedTime", "")) or None,
                     "status": "failed",
                     "error": error_details(ValueError(err)),
@@ -664,7 +667,10 @@ def _bulk_identity(identifier: str, item) -> dict:
         "id": identifier,
         "entry_id": getattr(item, "EntryID", identifier),
         **format_message_identity(item),
-        "subject": getattr(item, "Subject", None) or "(no subject)",
+        "subject": (
+            sanitize_body_text(getattr(item, "Subject", "") or "")
+            or "(no subject)"
+        ),
         "received_time": str(getattr(item, "ReceivedTime", "")) or None,
     }
 
@@ -1308,7 +1314,7 @@ async def create_draft(
         result = {
             "status": "Draft created",
             "entry_id": mail.EntryID,
-            "subject": subject,
+            "subject": sanitize_body_text(subject),
         }
         if to:
             result["to"] = to
@@ -1500,7 +1506,7 @@ async def mark_as_read(
     """
     def _mark(outlook, namespace, entry_id, account, folder):
         item = _resolve_email_item(namespace, entry_id, account, folder)
-        subject = item.Subject
+        subject = sanitize_body_text(item.Subject or "") or "(no subject)"
         item.UnRead = False
         item.Save()
         return f"Marked as read: '{subject}'"
@@ -1538,7 +1544,7 @@ async def mark_as_unread(
     """
     def _mark(outlook, namespace, entry_id, account, folder):
         item = _resolve_email_item(namespace, entry_id, account, folder)
-        subject = item.Subject
+        subject = sanitize_body_text(item.Subject or "") or "(no subject)"
         item.UnRead = True
         item.Save()
         return f"Marked as unread: '{subject}'"
@@ -1580,7 +1586,7 @@ async def move_email(
     """
     def _move(outlook, namespace, entry_id, target_folder, account, folder):
         item = _resolve_email_item(namespace, entry_id, account, folder)
-        subject = item.Subject
+        subject = sanitize_body_text(item.Subject or "") or "(no subject)"
         old_entry_id = item.EntryID
 
         store = _require_store(namespace, account)
@@ -1646,7 +1652,7 @@ async def reply_email(
     """
     def _reply(outlook, namespace, entry_id, body, reply_all, account, folder):
         item = _resolve_email_item(namespace, entry_id, account, folder)
-        subject = item.Subject
+        subject = sanitize_body_text(item.Subject or "") or "(no subject)"
         reply_item = item.ReplyAll() if reply_all else item.Reply()
         reply_item.Body = body + "\n\n" + reply_item.Body
         reply_item.Send()
@@ -1710,7 +1716,7 @@ async def forward_email(
         folder,
     ):
         item = _resolve_email_item(namespace, entry_id, account, folder)
-        subject = item.Subject
+        subject = sanitize_body_text(item.Subject or "") or "(no subject)"
         fwd = item.Forward()
         fwd.To = to
         if cc:
@@ -3491,7 +3497,7 @@ async def set_category(
         item.Categories = categories
         item.Save()
         return (
-            f"Categories set on '{item.Subject}': "
+            f"Categories set on '{sanitize_body_text(item.Subject)}': "
             f"'{item.Categories or '(none)'}'"
         )
 

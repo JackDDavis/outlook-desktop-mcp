@@ -11,6 +11,7 @@ _CRITERION_DESCRIPTIONS = {
     "criterion_6": "calendar local-time echo and timezone",
     "criterion_7": "Exchange DASL and capped IMAP sender modes",
     "criterion_8": "idempotent move rerun and restart interruption",
+    "criterion_9": "mail subject and body text sanitization",
 }
 _EXPECTED_CRITERIA = set(_CRITERION_DESCRIPTIONS)
 _RELIABILITY_CRITERIA = {}

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import unicodedata
 
 import pytest
 
@@ -18,6 +19,7 @@ from tests.fakes import Collection, FakeComError, FakeMailItem, make_entry_id
 from tests.test_bulk import (
     BatchingBridge,
     FakeStore,
+    FilterStore,
     MappingNamespace,
     SequenceNamespace,
     SlowMailItem,
@@ -383,3 +385,37 @@ def test_rerun_move_skips_missing_and_restart_interrupts_snapshot(
     assert interrupted["results"] == proven_rows
     assert interrupted["remaining"] == 35
     assert interrupted["guidance"] == INTERRUPTED_GUIDANCE
+
+
+@pytest.mark.reliability_criterion("criterion_9")
+def test_mail_result_surfaces_remove_format_characters(monkeypatch, tmp_path):
+    item = FakeMailItem(
+        make_entry_id(),
+        subject="\u200bAcceptance\u034f\u2007subject",
+    )
+    item.Body = "Body\u00ad " + ("\u034f\u2007" * 20) + "\u2060text"
+    store = FilterStore([item])
+    namespace = MappingNamespace([item], store=store)
+    monkeypatch.setattr(server, "bridge", BatchingBridge(namespace))
+    monkeypatch.setattr(
+        server,
+        "operation_manager",
+        OperationManager(tmp_path, process_instance_id="acceptance-sanitize"),
+    )
+
+    listed = _payload(asyncio.run(server.list_emails(
+        count=1,
+        include_body=True,
+    )))[0]
+    read = _payload(asyncio.run(server.read_email(entry_id=item.EntryID)))
+    bulk = _payload(asyncio.run(server.bulk_read_emails(
+        entry_ids=item.EntryID,
+    )))["results"][0]["email"]
+
+    for payload in (listed, read, bulk):
+        for field in ("subject", "body_preview", "body"):
+            value = payload.get(field)
+            if value is None:
+                continue
+            assert "\u034f" not in value
+            assert all(unicodedata.category(char) != "Cf" for char in value)

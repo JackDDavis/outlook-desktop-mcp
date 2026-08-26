@@ -308,6 +308,11 @@ Tool failures return a structured error with `code`, `meaning`,
 `likely_cause`, `suggested_action`, and `retryable`. Known Outlook HRESULTs
 also include a sanitized `hresult`; raw COM internals remain in server logs.
 
+Mail `subject`, `body_preview`, and `body` fields are sanitized at the
+formatting boundary. Invisible Unicode format characters and anti-filter junk
+are removed, Unicode spaces are normalized, and preview whitespace is
+collapsed without changing full-body layout.
+
 `outlook_status()` does not wait behind queued COM work. When Outlook is busy,
 it immediately reports the active request, queue depth, and age of the last
 successful COM call. It submits a five-second live COM probe only when the
@@ -457,7 +462,7 @@ py -m pytest tests/test_reliability_acceptance.py tests/test_mcp_acceptance.py -
 
 A successful hermetic run regenerates
 `tests/artifacts/reliability_acceptance.json`, a stable machine-readable result
-for all eight reliability criteria. It contains no machine paths or timestamps.
+for all nine reliability criteria. It contains no machine paths or timestamps.
 
 The live Outlook harness is intentionally excluded from normal CI. It requires
 Windows, Outlook Desktop (Classic), and explicit opt-in:
@@ -502,7 +507,7 @@ outlook-desktop-mcp/
       errors.py            # Structured, sanitized diagnostics
       responses.py         # MCP-native response and metadata helpers
   tests/
-    test_reliability_acceptance.py # Eight-criterion hermetic acceptance
+    test_reliability_acceptance.py # Nine-criterion hermetic acceptance
     test_mcp_acceptance.py         # Fake stdio/SSE MCP transport acceptance
     live_reliability_acceptance.py # Explicitly opt-in real Outlook harness
     artifacts/                     # Stable machine-readable acceptance result

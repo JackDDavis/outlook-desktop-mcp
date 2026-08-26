@@ -21,10 +21,12 @@ All notable changes to this project will be documented in this file.
   including ANSI property fallback and explicit `id_stable` availability
 - Exact folder/account-scoped Message-ID resolution for single and bulk email
   tools, with strict identifier validation and duplicate detection
-- Hermetic eight-criterion reliability acceptance coverage, including fake
+- Hermetic nine-criterion reliability acceptance coverage, including fake
   stdio/SSE MCP transport checks and a stable machine-readable result artifact
 - Explicitly opt-in `live_outlook` acceptance harness that creates and cleans
   only a uniquely named disposable draft
+- Mail subject/body sanitization that strips Unicode format characters and
+  anti-filter junk while preserving readable non-ASCII text and body layout
 
 ### Changed
 - COM requests now have configurable 30-second single-call and 90-second bulk
