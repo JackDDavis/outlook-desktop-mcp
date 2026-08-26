@@ -39,6 +39,11 @@ def test_http_transport_starts_before_outlook_com_is_ready(monkeypatch):
 
     server.main()
 
-    assert bridge.start_calls == [{"wait_until_ready": False}]
+    assert bridge.start_calls == [
+        {
+            "wait_until_ready": False,
+            "initialization_delay_seconds": 3.0,
+        }
+    ]
     assert mcp.transport == "sse"
     assert bridge.stopped is True

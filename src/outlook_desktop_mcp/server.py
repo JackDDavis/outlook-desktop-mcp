@@ -3655,7 +3655,10 @@ def main():
         logger.info("Denied %d tool(s): %s", len(denied), ", ".join(denied))
 
     logger.info("Starting Outlook Desktop MCP server...")
-    bridge.start(wait_until_ready=not args.http)
+    bridge.start(
+        wait_until_ready=not args.http,
+        initialization_delay_seconds=3.0 if args.http else 0,
+    )
 
     if args.http:
         mcp.settings.host = args.host

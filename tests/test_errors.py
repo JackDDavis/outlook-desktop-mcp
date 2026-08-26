@@ -26,6 +26,22 @@ def test_mapi_exception_is_retryable():
     assert details["retryable"] is True
 
 
+def test_server_execution_failure_is_retryable():
+    details = error_details(FakeComError(-2146959355))
+
+    assert details["code"] == "server_execution_failed"
+    assert details["hresult"] == "0x80080005"
+    assert details["retryable"] is True
+
+
+def test_outlook_not_registered_identifies_integrity_mismatch():
+    details = error_details(FakeComError(-2147221021))
+
+    assert details["code"] == "outlook_not_registered"
+    assert details["hresult"] == "0x800401E3"
+    assert details["retryable"] is True
+
+
 def test_unknown_com_error_keeps_only_sanitized_message():
     details = error_details(FakeComError(-1, "  private   COM detail  "))
 

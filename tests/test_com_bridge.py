@@ -1,6 +1,8 @@
 import asyncio
+import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,9 +10,16 @@ from outlook_desktop_mcp.com_bridge import BridgeTimeoutError, OutlookBridge
 from outlook_desktop_mcp.utils.responses import tool_result
 
 
+class FakeComError(Exception):
+    def __init__(self, hresult):
+        self.hresult = hresult
+        super().__init__(hresult, "Server execution failed")
+
+
 class FakeNamespace:
     DefaultStore = type("Store", (), {"DisplayName": "Test Store"})()
     CurrentUser = type("User", (), {"Name": "Test User"})()
+    Stores = type("Stores", (), {"Count": 1})()
 
 
 def start_fake_bridge(monkeypatch):
@@ -57,6 +66,22 @@ def test_start_can_return_before_outlook_is_ready():
         bridge.stop()
 
     assert elapsed < 0.05
+
+
+def test_nonblocking_start_can_delay_com_initialization():
+    bridge = OutlookBridge()
+    initialized = threading.Event()
+    bridge._com_thread_main = initialized.set
+
+    try:
+        bridge.start(
+            wait_until_ready=False,
+            initialization_delay_seconds=0.05,
+        )
+        assert initialized.wait(0.01) is False
+        assert initialized.wait(0.2) is True
+    finally:
+        bridge.stop()
 
 
 def test_parallel_calls_are_serialized_with_queue_metrics(monkeypatch):
@@ -235,6 +260,14 @@ def test_invalid_timeout_environment(monkeypatch):
         OutlookBridge()
 
 
+def test_startup_timeout_environment_is_configurable(monkeypatch):
+    monkeypatch.setenv("MCP_COM_STARTUP_TIMEOUT_SECONDS", "120")
+
+    bridge = OutlookBridge()
+
+    assert bridge.startup_timeout_seconds == 120
+
+
 def test_timeout_on_stopped_bridge_does_not_leave_pending_request():
     bridge = OutlookBridge()
 
@@ -261,3 +294,46 @@ def test_call_fails_immediately_after_bridge_initialization_error():
 
     assert time.monotonic() - started < 0.05
     assert bridge.health_snapshot()["queue_depth"] == 0
+
+
+def test_initialization_retries_transient_server_execution_failure(monkeypatch):
+    bridge = OutlookBridge()
+    attempts = []
+    transient = FakeComError(0x80080005)
+
+    def initialize():
+        attempts.append("attempt")
+        if len(attempts) == 1:
+            raise transient
+        return object(), FakeNamespace()
+
+    monkeypatch.setattr(bridge, "_initialize_outlook", initialize)
+    monkeypatch.setattr(bridge, "initialization_retry_seconds", 0.01)
+
+    outlook, namespace = bridge._initialize_outlook_with_retry()
+
+    assert outlook is not None
+    assert namespace is not None
+    assert attempts == ["attempt", "attempt"]
+    assert bridge.health_snapshot()["last_failure"]["hresult"] == "0x80080005"
+
+
+def test_initialization_only_attaches_to_running_outlook(monkeypatch):
+    bridge = OutlookBridge()
+    namespace = FakeNamespace()
+    outlook = SimpleNamespace(GetNamespace=lambda _name: namespace)
+    client = SimpleNamespace(
+        GetActiveObject=lambda _name: outlook,
+        Dispatch=lambda _name: pytest.fail("must not launch Outlook"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "win32com",
+        SimpleNamespace(client=client),
+    )
+    monkeypatch.setitem(sys.modules, "win32com.client", client)
+
+    connected_outlook, connected_namespace = bridge._initialize_outlook()
+
+    assert connected_outlook is outlook
+    assert connected_namespace is namespace

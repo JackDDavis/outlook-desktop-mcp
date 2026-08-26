@@ -23,6 +23,16 @@ logger = logging.getLogger("outlook_desktop_mcp.com_bridge")
 
 DEFAULT_SINGLE_TIMEOUT_SECONDS = 30.0
 DEFAULT_BULK_TIMEOUT_SECONDS = 90.0
+DEFAULT_STARTUP_TIMEOUT_SECONDS = 60.0
+DEFAULT_INITIALIZATION_RETRY_SECONDS = 1.0
+_INITIALIZATION_RETRY_HRESULTS = {
+    0x800401E3,  # MK_E_UNAVAILABLE
+    0x80010001,  # RPC_E_CALL_REJECTED
+    0x80010108,  # RPC_E_DISCONNECTED
+    0x8001010A,  # RPC_E_SERVERCALL_RETRYLATER
+    0x800706BA,  # RPC server unavailable
+    0x80080005,  # CO_E_SERVER_EXEC_FAILURE
+}
 
 
 def _positive_env_float(name: str, default: float) -> float:
@@ -40,6 +50,17 @@ def _positive_env_float(name: str, default: float) -> float:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _hresult(error: Exception) -> int | None:
+    value = getattr(error, "hresult", None)
+    if not isinstance(value, int) and error.args and isinstance(error.args[0], int):
+        value = error.args[0]
+    return value & 0xFFFFFFFF if isinstance(value, int) else None
+
+
+def _is_initialization_retryable(error: Exception) -> bool:
+    return _hresult(error) in _INITIALIZATION_RETRY_HRESULTS
 
 
 @dataclass
@@ -125,46 +146,89 @@ class OutlookBridge:
             "MCP_BULK_CALL_TIMEOUT_SECONDS",
             DEFAULT_BULK_TIMEOUT_SECONDS,
         )
+        self.startup_timeout_seconds = _positive_env_float(
+            "MCP_COM_STARTUP_TIMEOUT_SECONDS",
+            DEFAULT_STARTUP_TIMEOUT_SECONDS,
+        )
+        self.initialization_retry_seconds = _positive_env_float(
+            "MCP_COM_INIT_RETRY_SECONDS",
+            DEFAULT_INITIALIZATION_RETRY_SECONDS,
+        )
 
-    def start(self, timeout: float = 60, *, wait_until_ready: bool = True):
+    def start(
+        self,
+        timeout: float | None = None,
+        *,
+        wait_until_ready: bool = True,
+        initialization_delay_seconds: float = 0,
+    ):
         """Start the COM thread, optionally without blocking server startup."""
+        startup_timeout = self.startup_timeout_seconds if timeout is None else timeout
+        if startup_timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if initialization_delay_seconds < 0:
+            raise ValueError("initialization_delay_seconds cannot be negative")
         self._thread = threading.Thread(
-            target=self._com_thread_main,
+            target=self._delayed_com_thread_main,
+            args=(initialization_delay_seconds,),
             daemon=True,
             name="outlook-com",
         )
         self._thread.start()
         if not wait_until_ready:
             return
-        if not self._ready.wait(timeout=timeout):
+        if not self._ready.wait(timeout=startup_timeout):
             if self._init_error:
                 raise self._init_error
             raise RuntimeError(
-                f"Outlook COM thread failed to initialize within {timeout}s. "
-                "Is Outlook Desktop (Classic) running?"
+                "Outlook COM thread failed to initialize within "
+                f"{startup_timeout:g}s. Set MCP_COM_STARTUP_TIMEOUT_SECONDS "
+                "to allow a longer Outlook startup window."
             )
         if self._init_error:
             raise self._init_error
 
+    def _delayed_com_thread_main(self, delay_seconds: float):
+        if delay_seconds and self._shutdown.wait(delay_seconds):
+            return
+        self._com_thread_main()
+
     def _initialize_outlook(self):
-        import pythoncom
         import win32com.client
 
-        try:
-            outlook = win32com.client.GetActiveObject("Outlook.Application")
-            logger.debug("Attached to the running Outlook COM instance")
-        except pythoncom.com_error:
-            outlook = win32com.client.Dispatch("Outlook.Application")
-            logger.debug("Started a new Outlook COM automation instance")
+        outlook = win32com.client.GetActiveObject("Outlook.Application")
+        logger.debug("Attached to the running Outlook COM instance")
         namespace = outlook.GetNamespace("MAPI")
         return outlook, namespace
+
+    def _initialize_outlook_with_retry(self):
+        while not self._shutdown.is_set():
+            try:
+                outlook, namespace = self._initialize_outlook()
+                namespace.DefaultStore.DisplayName
+                namespace.CurrentUser.Name
+                self._init_error = None
+                return outlook, namespace
+            except Exception as error:  # noqa: BLE001 - COM startup boundary
+                self._record_failure(error)
+                if not _is_initialization_retryable(error):
+                    self._init_error = error
+                    raise
+                logger.warning(
+                    "Outlook COM is not ready (%s); retrying in %.1fs",
+                    f"0x{_hresult(error):08X}",
+                    self.initialization_retry_seconds,
+                )
+                if self._shutdown.wait(self.initialization_retry_seconds):
+                    break
+        raise RuntimeError("Outlook COM bridge stopped during initialization")
 
     def _com_thread_main(self):
         import pythoncom
 
         pythoncom.CoInitialize()
         try:
-            self._outlook, self._namespace = self._initialize_outlook()
+            self._outlook, self._namespace = self._initialize_outlook_with_retry()
             store_name = self._namespace.DefaultStore.DisplayName
             user_name = self._namespace.CurrentUser.Name
             logger.debug(
@@ -198,6 +262,9 @@ class OutlookBridge:
                         self._active_request = request
 
                 try:
+                    with request.state_lock:
+                        if request.caller_timed_out:
+                            continue
                     request.result = request.function(
                         self._outlook,
                         self._namespace,

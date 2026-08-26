@@ -9,6 +9,8 @@ from typing import Any
 _logger = logging.getLogger("outlook_desktop_mcp.errors")
 
 _RPC_UNAVAILABLE = 0x800706BA
+_OUTLOOK_NOT_REGISTERED = 0x800401E3
+_SERVER_EXECUTION_FAILED = 0x80080005
 _MAPI_EXCEPTION = 0x80020009
 _MAPI_NOT_FOUND = 0x8004010F
 
@@ -23,6 +25,19 @@ class ErrorDefinition:
 
 
 _HRESULT_ERRORS = {
+    _OUTLOOK_NOT_REGISTERED: ErrorDefinition(
+        code="outlook_not_registered",
+        meaning="The running Outlook instance is not available to this process",
+        likely_cause=(
+            "Outlook is still starting or the MCP task has a different Windows "
+            "integrity level"
+        ),
+        suggested_action=(
+            "Ensure Outlook and the OutlookMCPServer task use the same integrity "
+            "level, then retry"
+        ),
+        retryable=True,
+    ),
     _RPC_UNAVAILABLE: ErrorDefinition(
         code="rpc_unavailable",
         meaning="Outlook is not responding",
@@ -30,6 +45,19 @@ _HRESULT_ERRORS = {
         suggested_action=(
             "Call outlook_status(); reconnect the MCP server if "
             "com_responsive is false, then restart Outlook if the failure recurs"
+        ),
+        retryable=True,
+    ),
+    _SERVER_EXECUTION_FAILED: ErrorDefinition(
+        code="server_execution_failed",
+        meaning="Outlook COM could not attach to the running Outlook instance",
+        likely_cause=(
+            "Outlook restarted or was still initializing when the MCP service "
+            "attempted to connect"
+        ),
+        suggested_action=(
+            "Retry after Outlook finishes starting; if it persists, restart "
+            "Outlook so its automation replaces the MCP task instance"
         ),
         retryable=True,
     ),
