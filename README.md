@@ -93,16 +93,18 @@ outlook-desktop-mcp --http --host 127.0.0.1 --port 3721
 ```
 
 If a scheduled task starts the SSE server, it must run at the same Windows
-integrity level as Outlook. For an existing `\OpenClaw\OutlookMCPServer` task,
-apply the tracked configuration:
+integrity level as Outlook. Outlook should normally run without elevation.
+For an existing `\OpenClaw\OutlookMCPServer` task, apply the tracked
+configuration:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\configure-autostart.ps1
 ```
 
-This also changes the task policy to replace a stale MCP instance when the
-Outlook VBA startup trigger runs again. The MCP server only attaches to an
-existing Outlook process; it never launches Outlook.
+This configures the task for normal-user integrity and changes its policy to
+replace a stale MCP instance when the Outlook VBA startup trigger runs again.
+The MCP server only attaches to an existing Outlook process; it never launches
+Outlook.
 
 HTTP/SSE keeps retrying COM attachment in the background. For stdio startup,
 increase `MCP_COM_STARTUP_TIMEOUT_SECONDS` if Outlook needs more than the

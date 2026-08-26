@@ -53,8 +53,8 @@ All notable changes to this project will be documented in this file.
 - HTTP COM initialization retries in the background until an existing Outlook
   instance is available; stdio uses configurable
   `MCP_COM_STARTUP_TIMEOUT_SECONDS`. The MCP server never launches Outlook.
-- Added `configure-autostart.ps1` to align the scheduled task's integrity level
-  with Outlook and replace stale task instances on subsequent VBA triggers
+- Added `configure-autostart.ps1` to run the scheduled task at normal-user
+  integrity with Outlook and replace stale instances on subsequent VBA triggers
 
 ## [0.4.0] — 2026-08-11
 

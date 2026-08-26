@@ -13,12 +13,12 @@ $xml = $xml.Replace(
 if ($xml -match '<RunLevel>.*?</RunLevel>') {
     $xml = $xml -replace `
         '<RunLevel>.*?</RunLevel>', `
-        '<RunLevel>HighestAvailable</RunLevel>'
+        '<RunLevel>LeastPrivilege</RunLevel>'
 } else {
     $xml = $xml.Replace(
         '<LogonType>InteractiveToken</LogonType>',
         '<LogonType>InteractiveToken</LogonType>' +
-        '<RunLevel>HighestAvailable</RunLevel>'
+        '<RunLevel>LeastPrivilege</RunLevel>'
     )
 }
 
