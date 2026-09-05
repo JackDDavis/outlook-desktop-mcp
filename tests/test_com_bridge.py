@@ -318,6 +318,69 @@ def test_initialization_retries_transient_server_execution_failure(monkeypatch):
     assert bridge.health_snapshot()["last_failure"]["hresult"] == "0x80080005"
 
 
+def test_initialization_recovers_from_corrupted_gen_py_cache(monkeypatch):
+    bridge = OutlookBridge()
+    attempts = []
+    corrupted = AttributeError(
+        "module 'win32com.gen_py.00062FFF-0000-0000-C000-000000000046x0x9x6' "
+        "has no attribute 'CLSIDToClassMap'"
+    )
+    reset_calls = []
+
+    def initialize():
+        attempts.append("attempt")
+        if len(attempts) == 1:
+            raise corrupted
+        return object(), FakeNamespace()
+
+    def fake_reset():
+        reset_calls.append("reset")
+        return "C:\\fake\\gen_py"
+
+    monkeypatch.setattr(bridge, "_initialize_outlook", initialize)
+    monkeypatch.setattr(
+        "outlook_desktop_mcp.com_bridge._reset_win32com_gen_py_cache",
+        fake_reset,
+    )
+
+    outlook, namespace = bridge._initialize_outlook_with_retry()
+
+    assert outlook is not None
+    assert namespace is not None
+    assert attempts == ["attempt", "attempt"]
+    assert reset_calls == ["reset"]
+
+
+def test_initialization_only_resets_gen_py_cache_once(monkeypatch):
+    bridge = OutlookBridge()
+    attempts = []
+    corrupted = AttributeError(
+        "module 'win32com.gen_py.00062FFF-0000-0000-C000-000000000046x0x9x6' "
+        "has no attribute 'CLSIDToClassMap'"
+    )
+    reset_calls = []
+
+    def initialize():
+        attempts.append("attempt")
+        raise corrupted
+
+    def fake_reset():
+        reset_calls.append("reset")
+        return "C:\\fake\\gen_py"
+
+    monkeypatch.setattr(bridge, "_initialize_outlook", initialize)
+    monkeypatch.setattr(
+        "outlook_desktop_mcp.com_bridge._reset_win32com_gen_py_cache",
+        fake_reset,
+    )
+
+    with pytest.raises(AttributeError, match="CLSIDToClassMap"):
+        bridge._initialize_outlook_with_retry()
+
+    assert attempts == ["attempt", "attempt"]
+    assert reset_calls == ["reset"]
+
+
 def test_initialization_only_attaches_to_running_outlook(monkeypatch):
     bridge = OutlookBridge()
     namespace = FakeNamespace()

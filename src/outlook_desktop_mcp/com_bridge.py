@@ -63,6 +63,37 @@ def _is_initialization_retryable(error: Exception) -> bool:
     return _hresult(error) in _INITIALIZATION_RETRY_HRESULTS
 
 
+_GEN_PY_CACHE_MARKER = "CLSIDToClassMap"
+
+
+def _is_corrupted_gen_py_cache(error: Exception) -> bool:
+    """Detect pywin32's "gen_py cache exists but is broken" failure mode.
+
+    A gen_py cache directory left without ``__init__.py`` (an interrupted
+    generation, or a leftover from a different pywin32 version) imports as
+    an empty Python 3 namespace package instead of raising
+    ModuleNotFoundError, so the corruption only surfaces later as this
+    AttributeError.
+    """
+    return isinstance(error, AttributeError) and _GEN_PY_CACHE_MARKER in str(error)
+
+
+def _reset_win32com_gen_py_cache() -> str | None:
+    """Delete pywin32's generated COM cache so it regenerates cleanly."""
+    import shutil
+    import sys
+
+    import win32com
+
+    cache_dir = win32com.__gen_path__
+    for name in list(sys.modules):
+        if name == "win32com.gen_py" or name.startswith("win32com.gen_py."):
+            del sys.modules[name]
+    if cache_dir and os.path.isdir(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    return cache_dir
+
+
 @dataclass
 class BridgeRequest:
     name: str
@@ -202,6 +233,7 @@ class OutlookBridge:
         return outlook, namespace
 
     def _initialize_outlook_with_retry(self):
+        gen_py_cache_reset = False
         while not self._shutdown.is_set():
             try:
                 outlook, namespace = self._initialize_outlook()
@@ -211,6 +243,16 @@ class OutlookBridge:
                 return outlook, namespace
             except Exception as error:  # noqa: BLE001 - COM startup boundary
                 self._record_failure(error)
+                if _is_corrupted_gen_py_cache(error) and not gen_py_cache_reset:
+                    gen_py_cache_reset = True
+                    cache_dir = _reset_win32com_gen_py_cache()
+                    logger.warning(
+                        "Cleared corrupted win32com gen_py cache at %s after "
+                        "initialization error (%s); retrying",
+                        cache_dir,
+                        error,
+                    )
+                    continue
                 if not _is_initialization_retryable(error):
                     self._init_error = error
                     raise
